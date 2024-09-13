@@ -3,11 +3,12 @@
 set -xe
 
 CC=gcc
-CFLAGS="-Wall -O2 -ggdb"
+CFLAGS="-Wall -Wextra -O2 -ggdb"
 INC="-I./raylib/include"
-LIBS="-lstdc++ -lm -L./raylib/lib -lraylib -ldl -lpthread"
+LIBS="-lstdc++ -lm -L./raylib/lib -lraylib -ldl -lpthread -lgsl -lgslcblas"
 
-#g++ $CFLAGS -c mtwist.c -o mtwist.o
+g++ $CFLAGS -c mtwist.c -o mtwist.o
 DEPS="mtwist.o"
 
-$CC $CFLAGS $INC sho-pimc.c $DEPS -o sho-pimc.exe $LIBS 
+$CC $CFLAGS $INC 1d_sho.c $DEPS -o 1d_sho.exe $LIBS 
+$CC $CFLAGS $INC 3d_sho.c $DEPS -o 3d_sho.exe $LIBS 

@@ -33,32 +33,17 @@ double generate_normal(double sigma)
 #include "arena.h"
 static Arena arena = {0};
 
-#define return_defer(value) do { result = (value); goto defer; } while (0)
+#define COMMON_IMPLEMENTATION
+#include "common.h"
 
-#define DA_INIT_CAP 256
+void subcmd_visualize(const char *program_path, int argc, char **argv);
+void subcmd_run(const char *program_path, int argc, char **argv);
 
-#define da_append(da, item)                                                          \
-    do {                                                                             \
-        if ((da)->count >= (da)->capacity) {                                         \
-            (da)->capacity = (da)->capacity == 0 ? DA_INIT_CAP : (da)->capacity*2;   \
-            (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
-            assert((da)->items != NULL && "Buy more RAM lol");                       \
-        }                                                                            \
-                                                                                     \
-        (da)->items[(da)->count++] = (item);                                         \
-    } while (0)
-
-typedef struct {
-    size_t CenterOfMass;
-    size_t Staging;
-} AcceptanceRate;
-
-typedef struct {
-    double **beads;
-    size_t numParticles;
-    size_t numTimeSlices;
-    double tau;
-} Path;
+Subcmd subcmds[] = {
+    DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
+    DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
+};
+#define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
 
 typedef struct {
     double *items;
@@ -74,8 +59,9 @@ Path path = {0};
 
 double V(double x) { return 0.5*x*x; }
 
-double SHOExact(double T) {
-    return 0.5/tanh(0.5/T);
+double SHOExact(double beta) {
+    //return 0.5/tanh(0.5/T);
+    return 0.5/tanh(0.5*beta);
 }
 
 double PotentialAction(Path path, size_t tslice) 
@@ -361,67 +347,7 @@ void alloc_beads(Path *path)
     }
 }
 
-typedef struct {
-    void (*run)(const char *program_path, int argc, char **argv);
-    const char *id;
-    const char *description;
-} Subcmd;
 
-void subcmd_visualize(const char *program_path, int argc, char **argv);
-void subcmd_run(const char *program_path, int argc, char **argv);
-
-#define DEFINE_SUBCMD(name, desc) \
-    {                             \
-        .run = subcmd_##name,     \
-        .id  = #name,             \
-        .description = desc       \
-    } 
-
-
-Subcmd subcmds[] = {
-    DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
-    DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
-};
-
-#define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
-
-Subcmd *find_subcmd_by_id(const char *id) 
-{
-    for (size_t k = 0; k < SUBCMDS_COUNT; ++k) {
-        if (strcmp(subcmds[k].id, id) == 0) {
-            return &subcmds[k];
-        }
-    }
-
-    return NULL; 
-}
-
-void usage(const char *program_path)
-{
-    fprintf(stderr, "Usage: %s [subcommand]\n", program_path);
-    fprintf(stderr, "Subcommands:\n");
-
-    int width = 0;
-    for (size_t k = 0; k < SUBCMDS_COUNT; ++k) {
-        int len = strlen(subcmds[k].id);
-        if (width < len) width = len;
-    }
-
-    for (size_t k = 0; k < SUBCMDS_COUNT; ++k) {
-        fprintf(stderr, "    %-*s - %s\n", width, subcmds[k].id, subcmds[k].description);
-    }
-}
-
-char* shift(int *argc, char ***argv)
-{
-    assert(*argc > 0);
-    char *result = *argv[0];
-
-    *argc -= 1;
-    *argv += 1;
-
-    return result; 
-}
 
 #define COLOR_BACKGROUND GetColor(0x181818FF)
 
@@ -535,17 +461,18 @@ void subcmd_run(const char *program_path, int argc, char **argv)
     uint32_t seed = mt_goodseed();
     mt_seed32(seed);
 
-    double T = 1.0; // K
+    //double T = 1.0; // K
+    double beta = 10.0;
 
     path.numParticles = 1;
-    path.numTimeSlices = 16;
-    path.tau = 1.0/(T * path.numTimeSlices);
+    path.numTimeSlices = 32;
+    path.tau = beta/path.numTimeSlices;
     alloc_beads(&path);
 
     printf("Simulation parameters:\n");
     printf("Number of Particles   = %zu\n", path.numParticles);
     printf("Number of Time Slices = %zu\n", path.numTimeSlices);
-    printf("T                     = %.3lf\n", T);
+    printf("beta                  = %.3lf\n", beta);
     printf("tau                   = %.3lf\n", path.tau);
 
     for (size_t i = 0; i < path.numTimeSlices; ++i) {
@@ -554,15 +481,15 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         }
     }
     
-    size_t MC_steps = 10 * 1000 * 1000;
+    size_t MC_steps = 20 * 1000 * 1000;
     EnergyTrace t = run_PIMC(path, MC_steps);
 
     int binSize = 500;
-    Stats s = getStatsEx(t , binSize);
+    Stats s = getStatsEx(t, binSize);
     printf("Collected %zu values\n", t.count); 
     printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, s.std);
 
-    double en_exact = SHOExact(T);
+    double en_exact = SHOExact(beta);
     printf("(Exact) Energy = %.5f\n", en_exact);
 
     double err = fabsf(s.mean - en_exact) / en_exact;
@@ -575,18 +502,18 @@ int main(int argc, char *argv[])
     char *program_path = shift(&argc, &argv);
 
     if (argc <= 0) {
-        usage(program_path);
+        usage(program_path, subcmds, SUBCMDS_COUNT);
         fprintf(stderr, "ERROR: no subcommand is provided\n");
         exit(1);
     }
 
     const char *subcmd_id = shift(&argc, &argv);
-    Subcmd *subcmd = find_subcmd_by_id(subcmd_id);
+    Subcmd *subcmd = find_subcmd_by_id(subcmds, SUBCMDS_COUNT, subcmd_id);
 
     if (subcmd != NULL) {
         subcmd->run(program_path, argc, argv);
     } else {
-        usage(program_path);
+        usage(program_path, subcmds, SUBCMDS_COUNT);
         fprintf(stderr, "ERROR: unknown subcommand  `%s`\n", subcmd_id);
         exit(1);
     }
@@ -594,7 +521,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-int main3()
+int main2()
 {
     EnergyTrace t = {0};
     da_append(&t, 6.0);
