@@ -8,8 +8,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include <gsl/gsl_histogram.h>
+
 #include "raylib.h"
 
+#define FONT_SIZE_LOAD 160 
+Font font = {0};
+
+#define MT_GENERATE_CODE_IN_HEADER 0
 #include "mtwist.h"
 /*
  * double mt_drand(void)
@@ -28,6 +34,8 @@ double generate_normal(double sigma)
     double V = mt_drand();
     return sigma * sqrt(-2 * log(U)) * cos(2.0 * M_PI * V);
 }
+
+#define MAX_FLOAT_TEXTLEN 100
 
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
@@ -51,10 +59,23 @@ typedef struct {
     size_t capacity;
 } EnergyTrace;
 
+typedef struct {
+    double *items;
+    size_t count;
+    size_t capacity;
+} PositionTrace;
+
+typedef struct {
+    EnergyTrace energies;
+    PositionTrace positions;
+} PIMC_Trace;
+
+PIMC_Trace trace = {0};
+
 // ---------------------------------------------------------
 double lam = 0.5; // hbar^2/2m k_B
 // ---------------------------------------------------------
-    
+
 Path path = {0};
 
 double V(double x) { return 0.5*x*x; }
@@ -159,7 +180,7 @@ Stats getStatsEx(EnergyTrace t, size_t binSize)
     memset(bins, 0.0, numBins * sizeof(double)); 
 
     int c = 0; // bin cursor
-    for (int i = 0; i < t.count; ++i) 
+    for (size_t i = 0; i < t.count; ++i) 
     {
         if ((i > 0) && (i % binSize == 0)) {
             bins[c] /= binSize;
@@ -181,14 +202,14 @@ Stats getStatsEx(EnergyTrace t, size_t binSize)
 
     Stats s = {0};
 
-    for (size_t i = 0; i < numBins; ++i) {
+    for (int i = 0; i < numBins; ++i) {
         s.mean = s.mean + bins[i];
     }
 
     s.mean /= numBins;
 
     double r = 0;
-    for (size_t i = 0; i < numBins; ++i) {
+    for (int i = 0; i < numBins; ++i) {
         r = r + (bins[i] - s.mean) * (bins[i] - s.mean); 
     }
 
@@ -300,17 +321,15 @@ defer:
 
 }
 
-EnergyTrace run_PIMC(Path path, size_t numSteps)
+void run_PIMC(Path path, size_t numSteps, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
-    int equilSkip = 20000;
-    int observableSkip = 400;
+    size_t equilSkip = 20000;
+    size_t observableSkip = 400;
     printf("Total MC steps: %zu\n", numSteps);
-    printf("Equilibration skip: %d\n", equilSkip);
-    printf("Collecting 1 out of %d steps\n", observableSkip); 
-
-    EnergyTrace trace = {0};
+    printf("Equilibration skip: %zu\n", equilSkip);
+    printf("Collecting 1 out of %zu steps\n", observableSkip); 
 
     for (size_t step = 0; step < numSteps; ++step) 
     {
@@ -325,8 +344,15 @@ EnergyTrace run_PIMC(Path path, size_t numSteps)
         }
 
        if ((step % observableSkip == 0) && (step > equilSkip)) {
-            da_append(&trace, Energy(path)); 
-       } 
+            da_append(&trace.energies, Energy(path));
+
+            if (collect_positions) {
+                assert(path.numParticles == 1);
+                for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+                    da_append(&trace.positions, path.beads[tslice][0]);
+                }
+            }
+       }
     }
 
     printf("--------------------------------------\n");
@@ -334,8 +360,6 @@ EnergyTrace run_PIMC(Path path, size_t numSteps)
     printf("Center of Mass : %.3lf\n", (double) acc.CenterOfMass/numSteps/path.numParticles);
     printf("Staging        : %.3lf\n", (double) acc.Staging/numSteps/path.numParticles);
     printf("--------------------------------------\n");
-
-    return trace;
 }
 
 void alloc_beads(Path *path)
@@ -429,6 +453,10 @@ void update_draw_frame()
 
 void subcmd_visualize(const char *program_path, int argc, char **argv)
 {
+    (void) program_path;
+    (void) argc;
+    (void) argv;
+
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     
@@ -456,8 +484,160 @@ void subcmd_visualize(const char *program_path, int argc, char **argv)
     CloseWindow();
 }
 
+void load_resources()
+{
+    int fileSize = 0;
+    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
+
+    font.baseSize = FONT_SIZE_LOAD;
+    font.glyphCount = 95;
+    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
+    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
+    font.texture = LoadTextureFromImage(atlas);
+    UnloadImage(atlas);
+    UnloadFileData(fileData);
+}
+
+void draw_histogram(const char* title, gsl_histogram *h) 
+{
+    size_t nbins = h->n;
+    double ymax = gsl_histogram_max_val(h);
+    double xmin = h->range[0];
+    double xmax = h->range[nbins];
+   
+    size_t samples_count = 0;
+    for (size_t i = 0; i < nbins; ++i) {
+        samples_count += (int) h->bin[i];
+    }
+    
+    double mean = gsl_histogram_mean(h);
+
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    
+    size_t factor = 80;
+    InitWindow(16*factor, 9*factor, title);
+    SetExitKey(KEY_Q);
+   
+    load_resources();
+
+    SetTargetFPS(60);
+
+    while (!WindowShouldClose()) {
+        BeginDrawing();
+        ClearBackground(COLOR_BACKGROUND);
+        
+        int screen_width = GetScreenWidth();
+        int screen_height = GetScreenHeight();
+
+        int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
+
+        Rectangle world = {
+            .x = 0.1*screen_width, 
+            .y = 0.1*screen_height, 
+            .width = simul_sz, 
+            .height = simul_sz
+        };
+            
+        double rect_width = world.width / nbins;
+
+        for (size_t i = 0; i < nbins; ++i) {
+            double height = gsl_histogram_get(h, i)/ymax * world.height; 
+            double factor = 0.9;
+
+            Rectangle r = {
+                .x = world.x + i*rect_width,
+                .y = world.y + world.height - factor*height, 
+                .width = rect_width,
+                .height = factor*height, 
+            };
+
+            DrawRectangleLinesEx(r, 2.0, YELLOW);
+        }
+
+        DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
+
+        
+        int font_size = 24;
+        {
+            Vector2 mean_st = {
+                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
+                .y = world.y,
+            };
+            Vector2 mean_end = {
+                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
+                .y = world.y + world.height,
+            };
+            DrawLineEx(mean_st, mean_end, 2.0, RED);
+
+            const char *buffer = TextFormat("%.3lf", mean);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x + (mean - xmin)/(xmax - xmin)*world.width - 0.25*text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, RED);
+        }
+
+        {
+            const char *buffer = TextFormat("%.3lf", xmin);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x - 0.25 * text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        }
+        {
+            const char *buffer = TextFormat("%.3lf", xmax);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x + world.width - 0.25 * text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        }
+        {
+            const char *buffer = TextFormat("Samples: %zu", samples_count);
+            Vector2 text_pos = {
+                world.x + world.width + 50,
+                world.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE); 
+        }
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+
+}
+
 void subcmd_run(const char *program_path, int argc, char **argv)
 {
+    (void) program_path;
+   
+    bool opt_energy_histogram = false;
+    bool opt_position_histogram = false;
+
+    if (argc > 0) {
+        char *opt = shift(&argc, &argv);
+        if (strcmp(opt, "--energy_histogram") == 0) {
+            fprintf(stdout, "-- Collecting energies in the histogram\n");
+            opt_energy_histogram = true;
+        } else if (strcmp(opt, "--position_histogram") == 0) {
+            fprintf(stdout, "-- Collecting positions in the histogram\n");
+            opt_position_histogram = true; 
+        } else {
+            // TODO: show available options
+            fprintf(stderr, "ERROR: unknown option passed to `run` subcommand: %s\n", opt);
+            exit(1); 
+        }
+        
+        // TODO: accepting only one option for now
+        assert(argc == 0);
+    }
+
     uint32_t seed = mt_goodseed();
     mt_seed32(seed);
 
@@ -481,21 +661,73 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         }
     }
     
-    size_t MC_steps = 20 * 1000 * 1000;
-    EnergyTrace t = run_PIMC(path, MC_steps);
+    size_t MC_steps = 100 * 1000 * 1000;
+    run_PIMC(path, MC_steps, true);
 
     int binSize = 500;
-    Stats s = getStatsEx(t, binSize);
-    printf("Collected %zu values\n", t.count); 
+    Stats s = getStatsEx(trace.energies, binSize);
+    printf("Collected %zu values\n", trace.energies.count); 
     printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, s.std);
 
     double en_exact = SHOExact(beta);
     printf("(Exact) Energy = %.5f\n", en_exact);
-
-    double err = fabsf(s.mean - en_exact) / en_exact;
+    
+    double err = fabs(s.mean - en_exact) / en_exact;
     printf("Error: %.2f%%\n", err*100.0);
-}
+    
+    if (opt_energy_histogram) {
+        gsl_histogram *en_histogram;
 
+        size_t nbins = 50;
+        en_histogram = gsl_histogram_alloc(nbins);
+        gsl_histogram_set_ranges_uniform(en_histogram, -0.5, 2.0);
+
+        for (size_t i = 0; i < trace.energies.count; ++i) {
+            gsl_histogram_increment(en_histogram, trace.energies.items[i]);
+        }
+
+        for (size_t i = 0; i < nbins; ++i) {
+            double lower, upper;
+            gsl_histogram_get_range(en_histogram, i, &lower, &upper);
+            
+            int c = gsl_histogram_get(en_histogram, i);
+            printf("%.5lf - %.5lf => %d\n", lower, upper, c);
+        }
+
+        draw_histogram("Energy histogram", en_histogram);
+        gsl_histogram_free(en_histogram);
+    }
+
+    if (opt_position_histogram) {
+        gsl_histogram *p_histogram;
+
+        size_t nbins = 50;
+        p_histogram = gsl_histogram_alloc(nbins);
+        gsl_histogram_set_ranges_uniform(p_histogram, -1.0, 1.0);
+
+
+        for (size_t i = 0; i < trace.positions.count; ++i) {
+            gsl_histogram_increment(p_histogram, trace.positions.items[i]);
+        }
+
+        double q2_mean = 0.0;
+        for (size_t i = 0; i < trace.positions.count; ++i) {
+            q2_mean = q2_mean + trace.positions.items[i]*trace.positions.items[i];
+        } 
+        q2_mean /= trace.positions.count;
+
+        // <q^2> = hbar/(2*m*omega) * coth(lambda/2), where lambda = beta*hbar*omega
+        double q2_exact = 0.5/tanh(0.5*beta);  
+
+        printf("(PIMC) <q^2> = %.5f\n", q2_mean); 
+        printf("(Exact) <q^2> = %.5f\n", q2_exact); 
+        err = fabs(q2_mean - q2_exact) / q2_exact;
+        printf("Error: %.2f%%\n", err*100.0);
+
+        draw_histogram("Position histogram", p_histogram);
+        gsl_histogram_free(p_histogram);
+    }
+}
 
 int main(int argc, char *argv[])
 {
@@ -521,17 +753,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-int main2()
-{
-    EnergyTrace t = {0};
-    da_append(&t, 6.0);
-    da_append(&t, 1.0);
-    da_append(&t, 2.0);
-    da_append(&t, 3.0);
-    da_append(&t, 4.0);
 
-    Stats s = getStatsEx(t, 2);
-    printf("m = %.5lf +/- %.5lf\n", s.mean, s.std);
-
-    return 0;
-}
+// TODO: 
+// -- block averaging ??
+// -- MPI
