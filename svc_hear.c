@@ -1,10 +1,9 @@
 #include <stdio.h>
-#include <string.h>
-#include <assert.h>
 #include <math.h>
 #include <stdbool.h>
-#include <stdlib.h>
+#include <float.h>
 
+#include <gsl/gsl_histogram.h>
 #include <gsl/gsl_statistics.h>
 
 #define ALU               5.29177210903e-11 // SI: m
@@ -13,6 +12,7 @@
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
 #define AVOGADRO          6.022140857 * 1e23 // mol^(-1)
+#define HTOCM             2.1947463136320e5  // 1 Hartree in cm-1
 
 #define MT_GENERATE_CODE_IN_HEADER 0
 #include "mtwist.h"
@@ -41,23 +41,27 @@ static Arena arena = {0};
 #define COMMON_IMPLEMENTATION
 #include "common.h"
 
-void subcmd_estimate_distribution_function(const char *program_path, int argc, char **argv);
-void subcmd_estimate_energy(const char *program_path, int argc, char **argv);
+#define HEAR_IMPLEMENTATION
+#include "V_HeAr.h"
 
-Subcmd subcmds[] = {
-    DEFINE_SUBCMD(estimate_energy, "collect the energy estimator during the PIMC simulation"),
-    DEFINE_SUBCMD(estimate_distribution_function, "collect the diagonal term of the density matrix during the PIMC simulation"),
-};
-#define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
+#include "raylib.h"
 
-typedef struct {
-    double *items;
-    size_t count;
-    size_t capacity;
-} EnergyTrace;
+#define COLOR_BACKGROUND GetColor(0x181818FF)
 
-#define lam 0.5 // 1.0/(2.0*mu) // hbar^2/2m
-#define RMAX 1.0 // a.u.
+#define FONT_SIZE_LOAD 160 
+Font font = {0};
+
+// ---------------------------------------------------------
+#define m_He (4.00260325413 * RAMTOAMU)
+#define m_Ar (39.9623831237 * RAMTOAMU)
+#define mu m_He * m_Ar / (m_He + m_Ar)  // a.u.
+                                         
+#define lam 1.0/(2.0*mu) // hbar^2/2m
+
+#define RMAX_COLLECT 30.0 // a.u.
+#define RMAX_CUBE    35.0 // a.u.
+//#define TT 300.0 // K
+// ---------------------------------------------------------
 
 #define XC(coords, i) coords[3*i + 0]
 #define YC(coords, i) coords[3*i + 1]
@@ -65,9 +69,24 @@ typedef struct {
 
 Path path = {0};
 
-double V(double r) { 
-    return 0.5*r*r;
-}
+typedef struct {
+    double *items;
+    size_t count;
+    size_t capacity;
+} SVC_Trace;
+
+typedef struct {
+    double *items;
+    size_t count;
+    size_t capacity;
+} PositionTrace;
+
+typedef struct {
+    SVC_Trace svcs;
+    PositionTrace positions;
+} PIMC_Trace;
+
+PIMC_Trace trace = {0};
 
 void alloc_beads(Path *path)
 {
@@ -85,10 +104,10 @@ double PotentialAction(Path path, size_t tslice)
     double pot = 0.0;
     for (size_t ptcl = 0; ptcl < path.numParticles; ++ptcl) {
         double r = XC(path.beads[tslice], ptcl)*XC(path.beads[tslice], ptcl) + 
-            YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
-            ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
+                   YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
+                   ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
         r = sqrt(r);
-        pot = pot + V(r);
+        pot = pot + V_HeAr(r);
     }
 
     return path.tau * pot;
@@ -103,7 +122,7 @@ double PotentialEnergy(Path path) {
                        YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
                        ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
             r = sqrt(r);
-            result = result + V(r);
+            result = result + V_HeAr(r);
         }
     }
 
@@ -131,109 +150,16 @@ double KineticEnergy(Path path)
     return 3.0/2.0*path.numParticles/path.tau + tot/path.numTimeSlices;
 }
 
-double Energy(Path path) {
-    return PotentialEnergy(path)  + KineticEnergy(path);
-}
-
-
-typedef struct {
-    double mean;
-    double std;
-} Stats;
-
-Stats getStats(EnergyTrace t) 
-{
-    Stats s = {0};
-
-    for (size_t i = 0; i < t.count; ++i) {
-        s.mean = s.mean + t.items[i];
-    }
-
-    s.mean /= t.count;
-
-    double r = 0;
-    for (size_t i = 0; i < t.count; ++i) {
-        r = r + (t.items[i] - s.mean) * (t.items[i] - s.mean); 
-    }
-
-    r = r / (t.count - 1);
-    s.std = sqrt(r);
-
-    return s;
-}
-
-int compar(const void *a, const void *b) {
-    double *x = (double *) a;
-    double *y = (double *) b;
-    if (*x < *y) { 
-        return -1;
-    } else if (*x > *y) {
-        return 1; 
-    }
-    return 0;
-}
-
-Stats getStatsEx(EnergyTrace t, size_t binSize)
-// TODO: make sure that binning actually improves the std 
-{
-    qsort(t.items, t.count, sizeof(t.items[0]), compar);    
-
-    int numBins = ceil((float) t.count / binSize);
-    printf("numBins: %d\n", numBins);
-
-    double *bins = (double*) arena_alloc(&arena, numBins * sizeof(double));
-    memset(bins, 0.0, numBins * sizeof(double)); 
-
-    int c = 0; // bin cursor
-    for (size_t i = 0; i < t.count; ++i) 
-    {
-        if ((i > 0) && (i % binSize == 0)) {
-            bins[c] /= binSize;
-            c++;
-        }
-
-        bins[c] = bins[c] + t.items[i];
-    }
-
-    if (t.count % binSize != 0) {
-        bins[c] /= (t.count % binSize);
-    }
-
-    //printf("Bins: ");
-    //for (int i = 0; i < numBins; ++i) {
-    //    printf("%.2lf ", bins[i]);
-    //}
-    //printf("\n");
-
-    Stats s = {0};
-
-    for (int i = 0; i < numBins; ++i) {
-        s.mean = s.mean + bins[i];
-    }
-
-    s.mean /= numBins;
-
-    double r = 0;
-    for (int i = 0; i < numBins; ++i) {
-        r = r + (bins[i] - s.mean) * (bins[i] - s.mean); 
-    }
-
-    r = r / (numBins - 1);
-    s.std = sqrt(r);
-
-    return s; 
-}
-
-
 int COM_Move(Path path, size_t ptcl)
 {
     assert(ptcl < path.numParticles);
     int result = 0;
 
-    double delta = 0.75;
-    double shiftx = delta*RMAX*(-1.0 + 2.0*mt_drand());
-    double shifty = delta*RMAX*(-1.0 + 2.0*mt_drand());
-    double shiftz = delta*RMAX*(-1.0 + 2.0*mt_drand());
+    double delta = 0.1;
+    double shiftx = delta*RMAX_CUBE*(-1.0 + 2.0*mt_drand());
+    double shifty = delta*RMAX_CUBE*(-1.0 + 2.0*mt_drand());
+    double shiftz = delta*RMAX_CUBE*(-1.0 + 2.0*mt_drand());
+
 
     double oldAction = 0.0;
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
@@ -254,6 +180,29 @@ int COM_Move(Path path, size_t ptcl)
         XC(path.beads[tslice], ptcl) = XC(path.beads[tslice], ptcl) + shiftx;
         YC(path.beads[tslice], ptcl) = YC(path.beads[tslice], ptcl) + shifty;
         ZC(path.beads[tslice], ptcl) = ZC(path.beads[tslice], ptcl) + shiftz;
+    }
+    
+    // reject move that moves COM in such that any particles goes beyond RMAX_CUBE
+    bool within_cube = true;
+
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        double r = XC(path.beads[tslice], ptcl)*XC(path.beads[tslice], ptcl) + 
+                   YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
+                   ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
+        r = sqrt(r);
+
+        if (r > RMAX_CUBE) within_cube = false;
+    }
+
+    if (!within_cube) 
+    { 
+        for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+            XC(path.beads[tslice], ptcl) = oldbeadsx[tslice];
+            YC(path.beads[tslice], ptcl) = oldbeadsy[tslice];
+            ZC(path.beads[tslice], ptcl) = oldbeadsz[tslice];
+        }
+
+        return_defer(0); 
     }
 
     double newAction = 0.0;
@@ -352,8 +301,7 @@ defer:
 
 }
 
-
-EnergyTrace run_PIMC(Path path, size_t numSteps)
+void run_PIMC(Path path, size_t numSteps, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
@@ -363,7 +311,7 @@ EnergyTrace run_PIMC(Path path, size_t numSteps)
     printf("Equilibration skip: %zu\n", equilSkip);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
 
-    EnergyTrace trace = {0};
+    //EnergyTrace trace = {0};
 
     for (size_t step = 0; step < numSteps; ++step) 
     {
@@ -378,7 +326,26 @@ EnergyTrace run_PIMC(Path path, size_t numSteps)
         }
 
        if ((step % observableSkip == 0) && (step > equilSkip)) {
-            da_append(&trace, Energy(path)); 
+            //da_append(&trace, Energy(path)); 
+            if (collect_positions) {
+                assert(path.numParticles == 1);
+                size_t ptcl = 0;
+
+                for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+                    double r = XC(path.beads[tslice], ptcl)*XC(path.beads[tslice], ptcl) + 
+                               YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
+                               ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
+                    r = sqrt(r);
+                    
+                    if (r < RMAX_COLLECT) {
+                        da_append(&trace.positions, r);
+
+                        double Uval = V_HeAr(r);
+                        double svc_est = exp(-path.beta*Uval) - 1.0;
+                        da_append(&trace.svcs, svc_est);
+                    }
+                }
+            }
        } 
     }
 
@@ -387,32 +354,169 @@ EnergyTrace run_PIMC(Path path, size_t numSteps)
     printf("Center of Mass : %.3lf\n", (double) acc.CenterOfMass/numSteps/path.numParticles);
     printf("Staging        : %.3lf\n", (double) acc.Staging/numSteps/path.numParticles);
     printf("--------------------------------------\n");
-
-    return trace;
 }
 
-void subcmd_estimate_distribution_function(const char *program_path, int argc, char **argv)
+void load_resources()
 {
-    (void) program_path;
-    (void) argc;
-    (void) argv;
-    assert(false);
+    int fileSize = 0;
+    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
+
+    font.baseSize = FONT_SIZE_LOAD;
+    font.glyphCount = 95;
+    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
+    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
+    font.texture = LoadTextureFromImage(atlas);
+    UnloadImage(atlas);
+    UnloadFileData(fileData);
 }
 
-void subcmd_estimate_energy(const char *program_path, int argc, char **argv)
+void draw_histogram(const char* title, gsl_histogram *h) 
 {
-    (void) program_path;
-    (void) argc;
-    (void) argv;
+    size_t nbins = h->n;
+    double ymax = gsl_histogram_max_val(h);
+    double xmin = h->range[0];
+    double xmax = h->range[nbins];
+   
+    size_t samples_count = 0;
+    for (size_t i = 0; i < nbins; ++i) {
+        samples_count += (int) h->bin[i];
+    }
+    
+    double mean = gsl_histogram_mean(h);
 
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    
+    size_t factor = 80;
+    InitWindow(16*factor, 9*factor, title);
+    SetExitKey(KEY_Q);
+   
+    load_resources();
+
+    SetTargetFPS(60);
+
+    while (!WindowShouldClose()) {
+        BeginDrawing();
+        ClearBackground(COLOR_BACKGROUND);
+        
+        int screen_width = GetScreenWidth();
+        int screen_height = GetScreenHeight();
+
+        int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
+
+        Rectangle world = {
+            .x = 0.1*screen_width, 
+            .y = 0.1*screen_height, 
+            .width = simul_sz, 
+            .height = simul_sz
+        };
+            
+        double rect_width = world.width / nbins;
+
+        for (size_t i = 0; i < nbins; ++i) {
+            double height = gsl_histogram_get(h, i)/ymax * world.height; 
+            double factor = 0.9;
+
+            Rectangle r = {
+                .x = world.x + i*rect_width,
+                .y = world.y + world.height - factor*height, 
+                .width = rect_width,
+                .height = factor*height, 
+            };
+
+            DrawRectangleLinesEx(r, 2.0, YELLOW);
+        }
+
+        DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
+
+        
+        int font_size = 24;
+        {
+            Vector2 mean_st = {
+                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
+                .y = world.y,
+            };
+            Vector2 mean_end = {
+                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
+                .y = world.y + world.height,
+            };
+            DrawLineEx(mean_st, mean_end, 2.0, RED);
+
+            const char *buffer = TextFormat("%.3lf", mean);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x + (mean - xmin)/(xmax - xmin)*world.width - 0.25*text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, RED);
+        }
+
+        {
+            const char *buffer = TextFormat("%.3lf", xmin);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x - 0.25 * text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        }
+        {
+            const char *buffer = TextFormat("%.3lf", xmax);
+            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
+            Vector2 text_pos = {
+                world.x + world.width - 0.25 * text_len.x,
+                world.y + world.height + 0.25 * text_len.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        }
+        {
+            const char *buffer = TextFormat("Samples: %zu", samples_count);
+            Vector2 text_pos = {
+                world.x + world.width + 50,
+                world.y,
+            };
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE); 
+        }
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+
+}
+
+double minval(double *arr, size_t count)
+{
+    double c = FLT_MAX;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] < c) c = arr[i];
+    }
+
+    return c;
+}
+
+double maxval(double *arr, size_t count) 
+{
+    double c = FLT_MIN;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] > c) c = arr[i];
+    }
+
+    return c;
+}
+
+int main()
+{
     uint32_t seed = mt_goodseed();
     mt_seed32(seed);
 
-    double beta = 1.0;
-        
+    double T = 300.0; // K
+    double beta = 1.0/(Boltzmann_Hartree * T); 
+
     path.numParticles = 1;
-    path.numTimeSlices = 16;
+    path.numTimeSlices = 4;
     path.tau = beta/path.numTimeSlices;
+    path.beta = beta;
     alloc_beads(&path);
 
     printf("Simulation parameters:\n");
@@ -423,46 +527,51 @@ void subcmd_estimate_energy(const char *program_path, int argc, char **argv)
 
     for (size_t i = 0; i < path.numTimeSlices; ++i) {
         for (size_t j = 0; j < 3*path.numParticles; ++j) {
-            path.beads[i][j] = RMAX * 0.5*(-1.0 + 2.0*mt_drand()); 
+            path.beads[i][j] = RMAX_CUBE * 0.5*(-1.0 + 2.0*mt_drand()); 
         }
     }
    
-    size_t MC_steps = 10 * 1000 * 1000;
-    EnergyTrace t = run_PIMC(path, MC_steps);
+    size_t MC_steps = 30 * 1000 * 1000;
+    run_PIMC(path, MC_steps, true);
 
-    double mean = gsl_stats_mean(t.items, 1, t.count);        
-    double std = gsl_stats_sd_m(t.items, 1, t.count, mean);
+    double Lambda = /* Planck */ 2.0*M_PI / sqrt(2.0*M_PI * mu / beta); // a.u.^3
+    printf("Lambda: %.5f\n", Lambda);
 
-    double omega = 1.0;
-    double exact = 1.5/tanh(0.5*beta);
+    double V = RMAX_COLLECT*RMAX_COLLECT*RMAX_COLLECT;
+    double Lambda3 = Lambda*Lambda*Lambda; 
+    double F = Lambda3 * pow(pow(path.numTimeSlices, 3.0/2.0) / Lambda3, path.numTimeSlices);
+    printf("F = %.5f\n", F);
 
-    printf("Collected %zu values\n", t.count); 
-    printf("(PIMC) Energy = %.5f +/- %.5f\n", mean, std);
-    printf("(exact) Energy = %.5e\n", exact);
-    printf("Error: %.2f%%\n", (mean - exact)/exact*100);
-}
-
-int main(int argc, char *argv[])
-{
-    char *program_path = shift(&argc, &argv);
-
-    if (argc <= 0) {
-        usage(program_path, subcmds, SUBCMDS_COUNT);
-        fprintf(stderr, "ERROR: no subcommand is provided\n");
-        exit(1);
+    double Coeff = -0.5 * V * ALU*ALU*ALU * AVOGADRO * 1e6; 
+    for (size_t i = 0; i < trace.svcs.count; ++i) {
+        trace.svcs.items[i] *=  F * Coeff;
     }
 
-    const char *subcmd_id = shift(&argc, &argv);
-    Subcmd *subcmd = find_subcmd_by_id(subcmds, SUBCMDS_COUNT, subcmd_id);
+    printf("Collected SVC vals: %zu\n", trace.svcs.count);
+    
+    double svc_min = minval(trace.svcs.items, trace.svcs.count);
+    double svc_max = maxval(trace.svcs.items, trace.svcs.count);
+    printf("Minimum value: %lf\n", svc_min);
+    printf("Maximum value: %lf\n", svc_max);
 
-    if (subcmd != NULL) {
-        subcmd->run(program_path, argc, argv);
-    } else {
-        usage(program_path, subcmds, SUBCMDS_COUNT);
-        fprintf(stderr, "ERROR: unknown subcommand  `%s`\n", subcmd_id);
-        exit(1);
+    gsl_histogram *p_histogram;
+
+    size_t nbins = 100;
+    p_histogram = gsl_histogram_alloc(nbins);
+    gsl_histogram_set_ranges_uniform(p_histogram, -50.0, 50.0);
+
+
+    for (size_t i = 0; i < trace.positions.count; ++i) {
+        gsl_histogram_increment(p_histogram, trace.svcs.items[i]);
     }
 
+    gsl_histogram_fprintf(stdout, p_histogram, "%g", "%g");
+
+    draw_histogram("SVC histogram", p_histogram); 
+
+    gsl_histogram_free(p_histogram);
     return 0;
 }
 
+// T = 90 K => svc = -0.5 (1.18)
+// T = 300 K -> svc = -0.3 (18.5)
