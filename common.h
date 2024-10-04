@@ -44,6 +44,7 @@ typedef struct {
     size_t numParticles;
     size_t numTimeSlices;
     double tau;
+    double beta;
 } Path;
 
 #ifdef COMMON_IMPLEMENTATION

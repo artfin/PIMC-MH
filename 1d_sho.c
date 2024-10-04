@@ -497,6 +497,8 @@ void load_resources()
     UnloadImage(atlas);
     UnloadFileData(fileData);
 }
+      
+void put_stats(Vector2 pos);
 
 void draw_histogram(const char* title, gsl_histogram *h) 
 {
@@ -597,21 +599,49 @@ void draw_histogram(const char* title, gsl_histogram *h)
             };
             DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
         }
+
+        // Statistics
         {
             const char *buffer = TextFormat("Samples: %zu", samples_count);
             Vector2 text_pos = {
                 world.x + world.width + 50,
                 world.y,
             };
-            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE); 
+            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+
+            Vector2 stats_pos = {.x = text_pos.x, .y = text_pos.y + font_size};
+            put_stats(stats_pos);
         }
 
         EndDrawing();
     }
 
     CloseWindow();
-
 }
+
+
+// auxiliary variables to communicate info to 'put_stats' 
+static double PUT_MEAN;
+static double PUT_EXP_ERROR;
+static double PUT_ACTUAL_ERROR;
+
+void put_stats(Vector2 pos)
+{
+    int font_size = 24;
+
+    const char *buffer = TextFormat("Mean energy: %.5f", PUT_MEAN);
+    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
+
+    pos.y = pos.y + font_size;
+    buffer = TextFormat("Error estimate: %.5f", PUT_EXP_ERROR);
+    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
+
+    pos.y = pos.y + font_size;    
+    buffer = TextFormat("Actual error: %.5f", PUT_ACTUAL_ERROR);
+    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
+}
+
+
 
 void subcmd_run(const char *program_path, int argc, char **argv)
 {
@@ -661,19 +691,24 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         }
     }
     
-    size_t MC_steps = 100 * 1000 * 1000;
+    size_t MC_steps = 10 * 1000 * 1000;
     run_PIMC(path, MC_steps, true);
 
     int binSize = 500;
     Stats s = getStatsEx(trace.energies, binSize);
     printf("Collected %zu values\n", trace.energies.count); 
-    printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, s.std);
-
+    
+    // NOTE: the error of the mean is actually the samples std divided by the sqrt(number-of-samples)  
+    double en_err = s.std/sqrt(trace.energies.count); 
+    printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, en_err); 
+    
     double en_exact = SHOExact(beta);
     printf("(Exact) Energy = %.5f\n", en_exact);
     
     double err = fabs(s.mean - en_exact) / en_exact;
     printf("Error: %.2f%%\n", err*100.0);
+    
+     
     
     if (opt_energy_histogram) {
         gsl_histogram *en_histogram;
@@ -686,6 +721,7 @@ void subcmd_run(const char *program_path, int argc, char **argv)
             gsl_histogram_increment(en_histogram, trace.energies.items[i]);
         }
 
+        /*
         for (size_t i = 0; i < nbins; ++i) {
             double lower, upper;
             gsl_histogram_get_range(en_histogram, i, &lower, &upper);
@@ -693,6 +729,10 @@ void subcmd_run(const char *program_path, int argc, char **argv)
             int c = gsl_histogram_get(en_histogram, i);
             printf("%.5lf - %.5lf => %d\n", lower, upper, c);
         }
+        */
+        PUT_MEAN = s.mean;
+        PUT_EXP_ERROR = en_err;
+        PUT_ACTUAL_ERROR = fabs(s.mean - en_exact);
 
         draw_histogram("Energy histogram", en_histogram);
         gsl_histogram_free(en_histogram);
