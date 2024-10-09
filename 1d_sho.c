@@ -667,6 +667,30 @@ int start_server()
     return data_socket;
 }
 
+gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
+{
+    size_t nbins = h->n;
+    double add_bins = 1;
+    
+    double xmin = h->range[0];
+    double xmax = h->range[nbins];
+    double dx = h->range[1] - h->range[0];
+    
+    double new_xmin = xmin - add_bins*dx; 
+    double new_xmax = xmax + add_bins*dx; 
+    
+    gsl_histogram *new_h = gsl_histogram_alloc(nbins + 2*add_bins);
+    gsl_histogram_set_ranges_uniform(new_h, new_xmin, new_xmax);
+        
+    size_t nc = add_bins; // cursor over the new histogram
+    for (size_t i = 0; i < nbins; ++i) {
+        new_h->bin[nc++] = gsl_histogram_get(h, i); 
+    }
+
+    gsl_histogram_free(h);
+
+    return new_h;
+}
 
 void subcmd_client(const char *program_path, int argc, char **argv)
 {
@@ -708,9 +732,9 @@ void subcmd_client(const char *program_path, int argc, char **argv)
     double en_exact = SHOExact(beta);
     EnergyTrace tr = {0};
 
-    size_t nbins = 80;
+    size_t nbins = 20;
     gsl_histogram *h = gsl_histogram_alloc(nbins);
-    gsl_histogram_set_ranges_uniform(h, -1.0, 2.0);
+    gsl_histogram_set_ranges_uniform(h, -0.5, 0.5);
     size_t samples_count = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -731,11 +755,11 @@ void subcmd_client(const char *program_path, int argc, char **argv)
         
         int screen_width = GetScreenWidth();
         int screen_height = GetScreenHeight();
-
     
         double mean = gsl_histogram_mean(h);
         double sigma = gsl_histogram_sigma(h);
-        
+
+        nbins = h->n;
         double ymax = gsl_histogram_max_val(h);
         double xmin = h->range[0];
         double xmax = h->range[nbins];
@@ -749,7 +773,7 @@ void subcmd_client(const char *program_path, int argc, char **argv)
             .height = simul_sz
         };
             
-        double rect_width = world.width / nbins;
+        double rect_width = world.width / nbins; 
 
         for (size_t i = 0; i < nbins; ++i) {
             double height = gsl_histogram_get(h, i)/ymax * world.height; 
@@ -824,6 +848,10 @@ void subcmd_client(const char *program_path, int argc, char **argv)
             stats_pos.y += font_size; 
             buffer = TextFormat("Samples: %zu", samples_count);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+            
+            stats_pos.y += font_size; 
+            buffer = TextFormat("Number of bins: %zu", nbins);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
 
             stats_pos.y += font_size; 
             buffer = TextFormat("Mean energy: %.5f", mean);
@@ -842,6 +870,11 @@ void subcmd_client(const char *program_path, int argc, char **argv)
             stats_pos.y = stats_pos.y + font_size;    
             buffer = TextFormat("Actual error: %.5f", actual_error);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            double rel_error = fabs(actual_error) / en_exact;
+            stats_pos.y = stats_pos.y + font_size;    
+            buffer = TextFormat("Relative error: %.2f%%", rel_error*100.0);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
         }
 
         EndDrawing();
@@ -853,8 +886,12 @@ void subcmd_client(const char *program_path, int argc, char **argv)
             case SOCKOP_ERROR: break;
             case SOCKOP_SUCCESS: 
         };
-       
+     
         for (size_t i = 0; i < tr.count; ++i) {
+            while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
+                h = gsl_histogram_extend(h);
+                printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+            } 
             gsl_histogram_increment(h, tr.items[i]);
         }
         samples_count += tr.count;
@@ -898,7 +935,7 @@ void subcmd_run(const char *program_path, int argc, char **argv)
     mt_seed32(seed);
     
     path.numParticles = 1;
-    path.numTimeSlices = 64;
+    path.numTimeSlices = 128;
     path.beta = 10.0;
     path.tau = path.beta/path.numTimeSlices;
 
@@ -1018,6 +1055,24 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+
+int main2()
+{
+    gsl_histogram *h = gsl_histogram_calloc_uniform(5, 0, 5);
+    gsl_histogram_increment(h, 0.5);
+    gsl_histogram_increment(h, 1.5);
+
+    gsl_histogram_fprintf(stdout, h, "%f", "%f");
+
+    printf("------------------\n");
+
+    h = gsl_histogram_extend(h);
+    gsl_histogram_fprintf(stdout, h, "%f", "%f");
+
+    return 0;
+
+}
+
 
 
 // TODO: 
