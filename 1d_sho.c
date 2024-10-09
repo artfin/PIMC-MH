@@ -7,6 +7,9 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <inttypes.h>
+
 
 #include <gsl/gsl_histogram.h>
 
@@ -46,10 +49,12 @@ static Arena arena = {0};
 
 void subcmd_visualize(const char *program_path, int argc, char **argv);
 void subcmd_run(const char *program_path, int argc, char **argv);
+void subcmd_client(const char *program_path, int argc, char **argv);
 
 Subcmd subcmds[] = {
     DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
     DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
+    DEFINE_SUBCMD(client, "Start the client"),
 };
 #define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
 
@@ -74,6 +79,25 @@ PIMC_Trace trace = {0};
 
 // ---------------------------------------------------------
 double lam = 0.5; // hbar^2/2m k_B
+// ---------------------------------------------------------
+
+
+// ---------------------------------------------------------
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#define SOCKET_NAME "/tmp/pimc.sock"
+#define HANDSHAKE_MSG "START"
+
+typedef enum {
+    SOCKOP_SUCCESS = 0,
+    SOCKOP_ERROR,
+    SOCKOP_DISCONNECTED,
+} SocketOpResult;
+
+SocketOpResult send_trace(int sockfd, EnergyTrace tr);
+SocketOpResult recv_trace(int sockfd, EnergyTrace *tr);
 // ---------------------------------------------------------
 
 Path path = {0};
@@ -321,12 +345,15 @@ defer:
 
 }
 
-void run_PIMC(Path path, size_t numSteps, bool collect_positions)
+void pimc_driver(Path path, size_t numSteps, int sockfd, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
     size_t equilSkip = 20000;
     size_t observableSkip = 400;
+
+    size_t send_size = 1000;
+
     printf("Total MC steps: %zu\n", numSteps);
     printf("Equilibration skip: %zu\n", equilSkip);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
@@ -352,6 +379,13 @@ void run_PIMC(Path path, size_t numSteps, bool collect_positions)
                     da_append(&trace.positions, path.beads[tslice][0]);
                 }
             }
+
+            if (sockfd <= 0) continue; 
+            if (trace.energies.count == send_size) {
+                // @TODO: what if send was unsuccessful?
+                send_trace(sockfd, trace.energies); 
+                trace.energies.count = 0;
+            }
        }
     }
 
@@ -371,7 +405,14 @@ void alloc_beads(Path *path)
     }
 }
 
+void dealloc_beads(Path *path)
+{
+    for (size_t i = 0; i < path->numTimeSlices; ++i) {
+        free(path->beads[i]);
+    }
 
+    free(path->beads);
+}
 
 #define COLOR_BACKGROUND GetColor(0x181818FF)
 
@@ -494,34 +535,193 @@ void load_resources()
     font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
     Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
     font.texture = LoadTextureFromImage(atlas);
+
     UnloadImage(atlas);
     UnloadFileData(fileData);
 }
-      
-void put_stats(Vector2 pos);
 
-void draw_histogram(const char* title, gsl_histogram *h) 
+      
+
+SocketOpResult send_chars(int sockfd, const char *msg)
+// prepend the char buffer with a "header" 
 {
-    size_t nbins = h->n;
-    double ymax = gsl_histogram_max_val(h);
-    double xmin = h->range[0];
-    double xmax = h->range[nbins];
-   
-    size_t samples_count = 0;
-    for (size_t i = 0; i < nbins; ++i) {
-        samples_count += (int) h->bin[i];
+    uint32_t msg_length = strlen(msg);
+    if (send(sockfd, &msg_length, sizeof(msg_length), 0) != sizeof(msg_length)) {
+        perror("send");
+        return SOCKOP_ERROR; 
     }
     
-    double mean = gsl_histogram_mean(h);
+    ssize_t sent = send(sockfd, msg, msg_length, 0);
+    if (sent != (ssize_t) msg_length) {
+        perror("send");
+        return SOCKOP_ERROR; 
+    }
+    
+    return SOCKOP_SUCCESS;
+}
+
+SocketOpResult recv_chars(int sockfd, char *buffer)
+{
+    // assume that the message is prepended with a "header" that contains the length of the message 
+    uint32_t msg_length = 0;
+    ssize_t ret = recv(sockfd, &msg_length, sizeof(msg_length), 0);
+    if (ret == 0) {
+        //fprintf(stderr, "[server] connection closed\n");
+        return SOCKOP_DISCONNECTED; 
+    }
+
+    buffer = arena_alloc(&arena, msg_length*sizeof(char));
+    memset(buffer, 0, msg_length*sizeof(char));
+
+    ssize_t r = recv(sockfd, buffer, sizeof(char)*msg_length, 0);
+    if (r != msg_length) {
+        perror("recv");
+        return SOCKOP_ERROR;
+    } 
+
+    return SOCKOP_SUCCESS; 
+} 
+
+SocketOpResult send_trace(int sockfd, EnergyTrace tr)
+{
+    if (send(sockfd, &tr.count, sizeof(tr.count), 0) != sizeof(tr.count)) {
+        perror("send");
+        return SOCKOP_ERROR; 
+    }
+
+    ssize_t sent = send(sockfd, tr.items, tr.count*sizeof(tr.items[0]), 0);
+    if (sent != (ssize_t) (tr.count*sizeof(tr.items[0]) )) {
+        perror("send");
+        return SOCKOP_ERROR; 
+    } 
+
+    return SOCKOP_SUCCESS; 
+}
+
+
+SocketOpResult recv_trace(int sockfd, EnergyTrace *tr)
+{
+    memset(tr, 0, sizeof(EnergyTrace)); 
+
+    ssize_t ret = recv(sockfd, &tr->count, sizeof(tr->count), 0);
+    if (ret == 0) {
+        fprintf(stderr, "[server] connection closed\n");
+        return SOCKOP_DISCONNECTED; 
+    }
+    
+    tr->items = arena_alloc(&arena, tr->count*sizeof(double));
+    memset(tr->items, 0, tr->count*sizeof(double));
+    tr->capacity = tr->count;
+
+    ssize_t r = recv(sockfd, tr->items, sizeof(double)*tr->count, 0);
+    if (r != (ssize_t) (tr->count*sizeof(double))) {
+        perror("recv");
+        return SOCKOP_ERROR; 
+    } 
+
+    return SOCKOP_SUCCESS; 
+}
+
+int start_server()
+// TODO: maybe use non-blocking socket connection to postpone handling the message
+{
+    int server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server_socket < 0) {
+        fprintf(stderr, "ERROR: could not create the server socket\n");
+        exit(1);
+    }
+    
+    unlink(SOCKET_NAME);
+    
+    // bind the socket
+    struct sockaddr_un server_addr;
+    memset(&server_addr, 0, sizeof(struct sockaddr_un));
+
+    server_addr.sun_family = AF_UNIX;
+    strcpy(server_addr.sun_path, SOCKET_NAME);
+
+    int ret;
+    ret = bind(server_socket, (struct sockaddr *) &server_addr, sizeof(server_addr));
+    if (ret < 0) {
+        perror("bind");
+        exit(1);
+    }
+
+    // 5 - connection queues?
+    ret = listen(server_socket, 5);     
+    if (ret < 0) {
+        perror("listen");
+        exit(1);
+    }
+    
+    int data_socket;
+    struct sockaddr_un client_addr;
+    int clen = sizeof(client_addr);
+
+    data_socket = accept(server_socket, (struct sockaddr *) &client_addr, (socklen_t*) &clen);
+    if (data_socket < 0) {
+        perror("accept");
+        exit(1);
+    }
+
+    return data_socket;
+}
+
+
+void subcmd_client(const char *program_path, int argc, char **argv)
+{
+    (void) program_path;
+    (void) argc;
+    (void) argv;
+    
+    int server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    struct sockaddr_un server_addr;
+    server_addr.sun_family = AF_UNIX;
+    strcpy(server_addr.sun_path, SOCKET_NAME);
+
+    if (connect(server_socket, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
+        return; 
+    }
+
+    if (send_chars(server_socket, HANDSHAKE_MSG) < 0) return;
+        
+    char *msg = NULL;
+    SocketOpResult r = recv_chars(server_socket, msg);
+    switch (r) {
+        case SOCKOP_ERROR: exit(1);
+        case SOCKOP_DISCONNECTED: return; 
+        case SOCKOP_SUCCESS:
+    } 
+
+    if (msg && (strcmp(msg, HANDSHAKE_MSG) != 0)) {
+        fprintf(stderr, "[client] Connection is not established\n");
+        return; 
+    }
+
+    double beta;
+    size_t numTimeSlices;
+    recv(server_socket, &beta, sizeof(double), 0);
+    recv(server_socket, &numTimeSlices, sizeof(size_t), 0);
+    
+    double en_exact = SHOExact(beta);
+    EnergyTrace tr = {0};
+
+    size_t nbins = 80;
+    gsl_histogram *h = gsl_histogram_alloc(nbins);
+    gsl_histogram_set_ranges_uniform(h, -1.0, 2.0);
+    size_t samples_count = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     
     size_t factor = 80;
-    InitWindow(16*factor, 9*factor, title);
+    InitWindow(16*factor, 9*factor, "Client");
     SetExitKey(KEY_Q);
    
     load_resources();
+    int font_size = 24;
 
     SetTargetFPS(60);
 
@@ -532,6 +732,14 @@ void draw_histogram(const char* title, gsl_histogram *h)
         int screen_width = GetScreenWidth();
         int screen_height = GetScreenHeight();
 
+    
+        double mean = gsl_histogram_mean(h);
+        double sigma = gsl_histogram_sigma(h);
+        
+        double ymax = gsl_histogram_max_val(h);
+        double xmin = h->range[0];
+        double xmax = h->range[nbins];
+         
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
 
         Rectangle world = {
@@ -556,12 +764,10 @@ void draw_histogram(const char* title, gsl_histogram *h)
 
             DrawRectangleLinesEx(r, 2.0, YELLOW);
         }
-
+        
         DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
 
-        
-        int font_size = 24;
-        {
+        if (samples_count > 0) {
             Vector2 mean_st = {
                 .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
                 .y = world.y,
@@ -580,7 +786,7 @@ void draw_histogram(const char* title, gsl_histogram *h)
             };
             DrawTextEx(font, buffer, text_pos, font_size, 0, RED);
         }
-
+        
         {
             const char *buffer = TextFormat("%.3lf", xmin);
             Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
@@ -599,62 +805,82 @@ void draw_histogram(const char* title, gsl_histogram *h)
             };
             DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
         }
-
-        // Statistics
-        {
-            const char *buffer = TextFormat("Samples: %zu", samples_count);
-            Vector2 text_pos = {
-                world.x + world.width + 50,
-                world.y,
+       
+        // Statistics 
+        if (samples_count > 0) {
+            Vector2 stats_pos = { 
+                .x = world.x + world.width + 50, 
+                .y = world.y 
             };
-            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
 
-            Vector2 stats_pos = {.x = text_pos.x, .y = text_pos.y + font_size};
-            put_stats(stats_pos);
+            const char *buffer;
+            buffer = TextFormat("beta: %.2f", beta);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+            
+            stats_pos.y += font_size; 
+            buffer = TextFormat("time slices: %zu", numTimeSlices);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            stats_pos.y += font_size; 
+            buffer = TextFormat("Samples: %zu", samples_count);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            stats_pos.y += font_size; 
+            buffer = TextFormat("Mean energy: %.5f", mean);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+            
+            stats_pos.y = stats_pos.y + font_size;    
+            buffer = TextFormat("Exact energy: %.5f", en_exact);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            double exp_error = sigma/sqrt(samples_count);
+            stats_pos.y += font_size;
+            buffer = TextFormat("Error estimate: %.5f", exp_error);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            double actual_error = mean - en_exact; 
+            stats_pos.y = stats_pos.y + font_size;    
+            buffer = TextFormat("Actual error: %.5f", actual_error);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
         }
 
         EndDrawing();
+        
+        // @TODO: recv in non-blocking mode to still have client in responsive state  
+        SocketOpResult r = recv_trace(server_socket, &tr);
+        switch (r) {
+            case SOCKOP_DISCONNECTED: continue; 
+            case SOCKOP_ERROR: break;
+            case SOCKOP_SUCCESS: 
+        };
+       
+        for (size_t i = 0; i < tr.count; ++i) {
+            gsl_histogram_increment(h, tr.items[i]);
+        }
+        samples_count += tr.count;
+
+        arena_reset(&arena); 
     }
 
-    CloseWindow();
+    close(server_socket);
+    arena_free(&arena);
+    gsl_histogram_free(h);
 }
-
-
-// auxiliary variables to communicate info to 'put_stats' 
-static double PUT_MEAN;
-static double PUT_EXP_ERROR;
-static double PUT_ACTUAL_ERROR;
-
-void put_stats(Vector2 pos)
-{
-    int font_size = 24;
-
-    const char *buffer = TextFormat("Mean energy: %.5f", PUT_MEAN);
-    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
-
-    pos.y = pos.y + font_size;
-    buffer = TextFormat("Error estimate: %.5f", PUT_EXP_ERROR);
-    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
-
-    pos.y = pos.y + font_size;    
-    buffer = TextFormat("Actual error: %.5f", PUT_ACTUAL_ERROR);
-    DrawTextEx(font, buffer, pos, font_size, 0, WHITE);
-}
-
 
 
 void subcmd_run(const char *program_path, int argc, char **argv)
 {
     (void) program_path;
-   
-    bool opt_energy_histogram = false;
+  
+    bool opt_server = false; 
     bool opt_position_histogram = false;
 
     if (argc > 0) {
         char *opt = shift(&argc, &argv);
-        if (strcmp(opt, "--energy_histogram") == 0) {
-            fprintf(stdout, "-- Collecting energies in the histogram\n");
-            opt_energy_histogram = true;
+
+        if (strcmp(opt, "--server") == 0) {
+            fprintf(stdout ,"-- Start the server\n");
+            opt_server = true;
         } else if (strcmp(opt, "--position_histogram") == 0) {
             fprintf(stdout, "-- Collecting positions in the histogram\n");
             opt_position_histogram = true; 
@@ -667,22 +893,44 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         // TODO: accepting only one option for now
         assert(argc == 0);
     }
-
+    
     uint32_t seed = mt_goodseed();
     mt_seed32(seed);
-
-    //double T = 1.0; // K
-    double beta = 10.0;
-
+    
     path.numParticles = 1;
-    path.numTimeSlices = 32;
-    path.tau = beta/path.numTimeSlices;
+    path.numTimeSlices = 64;
+    path.beta = 10.0;
+    path.tau = path.beta/path.numTimeSlices;
+
+    int sockfd = 0;
+    if (opt_server) {
+        sockfd = start_server();
+       
+        char *msg = NULL;
+        do {
+            SocketOpResult r = recv_chars(sockfd, msg);
+            switch (r) {
+                case SOCKOP_ERROR: exit(1);
+                case SOCKOP_DISCONNECTED: { 
+                    sockfd = 0;
+                    break;
+                }
+                case SOCKOP_SUCCESS:
+            }
+        } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
+
+        if (send_chars(sockfd, HANDSHAKE_MSG) < 0) return; 
+    
+        send(sockfd, &path.beta, sizeof(double), 0);
+        send(sockfd, &path.numTimeSlices, sizeof(size_t), 0);
+    }
+
     alloc_beads(&path);
 
     printf("Simulation parameters:\n");
     printf("Number of Particles   = %zu\n", path.numParticles);
     printf("Number of Time Slices = %zu\n", path.numTimeSlices);
-    printf("beta                  = %.3lf\n", beta);
+    printf("beta                  = %.3lf\n", path.beta);
     printf("tau                   = %.3lf\n", path.tau);
 
     for (size_t i = 0; i < path.numTimeSlices; ++i) {
@@ -691,8 +939,8 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         }
     }
     
-    size_t MC_steps = 10 * 1000 * 1000;
-    run_PIMC(path, MC_steps, true);
+    size_t MC_steps = 100 * 1000 * 1000;
+    pimc_driver(path, MC_steps, sockfd, true);
 
     int binSize = 500;
     Stats s = getStatsEx(trace.energies, binSize);
@@ -702,42 +950,13 @@ void subcmd_run(const char *program_path, int argc, char **argv)
     double en_err = s.std/sqrt(trace.energies.count); 
     printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, en_err); 
     
-    double en_exact = SHOExact(beta);
+    double en_exact = SHOExact(path.beta);
     printf("(Exact) Energy = %.5f\n", en_exact);
     
     double err = fabs(s.mean - en_exact) / en_exact;
     printf("Error: %.2f%%\n", err*100.0);
-    
+   
      
-    
-    if (opt_energy_histogram) {
-        gsl_histogram *en_histogram;
-
-        size_t nbins = 50;
-        en_histogram = gsl_histogram_alloc(nbins);
-        gsl_histogram_set_ranges_uniform(en_histogram, -0.5, 2.0);
-
-        for (size_t i = 0; i < trace.energies.count; ++i) {
-            gsl_histogram_increment(en_histogram, trace.energies.items[i]);
-        }
-
-        /*
-        for (size_t i = 0; i < nbins; ++i) {
-            double lower, upper;
-            gsl_histogram_get_range(en_histogram, i, &lower, &upper);
-            
-            int c = gsl_histogram_get(en_histogram, i);
-            printf("%.5lf - %.5lf => %d\n", lower, upper, c);
-        }
-        */
-        PUT_MEAN = s.mean;
-        PUT_EXP_ERROR = en_err;
-        PUT_ACTUAL_ERROR = fabs(s.mean - en_exact);
-
-        draw_histogram("Energy histogram", en_histogram);
-        gsl_histogram_free(en_histogram);
-    }
-
     if (opt_position_histogram) {
         gsl_histogram *p_histogram;
 
@@ -757,16 +976,21 @@ void subcmd_run(const char *program_path, int argc, char **argv)
         q2_mean /= trace.positions.count;
 
         // <q^2> = hbar/(2*m*omega) * coth(lambda/2), where lambda = beta*hbar*omega
-        double q2_exact = 0.5/tanh(0.5*beta);  
+        double q2_exact = 0.5/tanh(0.5*path.beta);  
 
         printf("(PIMC) <q^2> = %.5f\n", q2_mean); 
         printf("(Exact) <q^2> = %.5f\n", q2_exact); 
         err = fabs(q2_mean - q2_exact) / q2_exact;
         printf("Error: %.2f%%\n", err*100.0);
 
-        draw_histogram("Position histogram", p_histogram);
-        gsl_histogram_free(p_histogram);
+        // draw_histogram("Position histogram", p_histogram);
+        // gsl_histogram_free(p_histogram);
     }
+
+    free(trace.energies.items);
+    free(trace.positions.items);
+    dealloc_beads(&path);    
+    close(sockfd);
 }
 
 int main(int argc, char *argv[])
@@ -790,10 +1014,11 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
+    arena_free(&arena);
+
     return 0;
 }
 
 
 // TODO: 
-// -- block averaging ??
 // -- MPI
