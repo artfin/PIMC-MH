@@ -29,6 +29,17 @@ typedef struct {
     const char *description;
 } Subcmd;
 
+typedef struct {
+    int rank;
+    int size;
+} MPI_Context;
+
+typedef struct {
+    void (*run)(MPI_Context ctx, int argc, char **argv);
+    const char *id;
+    const char *description;
+} MPI_Subcmd;
+
 
 Subcmd *find_subcmd_by_id(Subcmd *subcmds, size_t subcmds_count, const char *id); 
 void usage(const char *program_path, Subcmd *subcmds, size_t subcmds_count);

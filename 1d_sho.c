@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 
+#include <mpi.h>
 
 #include <gsl/gsl_histogram.h>
 
@@ -47,14 +48,14 @@ static Arena arena = {0};
 #define COMMON_IMPLEMENTATION
 #include "common.h"
 
-void subcmd_visualize(const char *program_path, int argc, char **argv);
-void subcmd_run(const char *program_path, int argc, char **argv);
-void subcmd_client(const char *program_path, int argc, char **argv);
+void subcmd_visualize(MPI_Context ctx, int argc, char **argv);
+void subcmd_run(MPI_Context ctx, int argc, char **argv);
+void subcmd_server(MPI_Context ctx, int argc, char **argv);
 
-Subcmd subcmds[] = {
+MPI_Subcmd subcmds[] = {
     DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
     DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
-    DEFINE_SUBCMD(client, "Start the client"),
+    DEFINE_SUBCMD(server, "start the server that monitors the calculation"),
 };
 #define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
 
@@ -77,28 +78,15 @@ typedef struct {
 
 PIMC_Trace trace = {0};
 
+//#define USE_UNIX_SOCKET
+#define COMMUNICATION_IMPLEMENTATION
+#include "communication.h"
+
 // ---------------------------------------------------------
 double lam = 0.5; // hbar^2/2m k_B
 // ---------------------------------------------------------
 
 
-// ---------------------------------------------------------
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-
-#define SOCKET_NAME "/tmp/pimc.sock"
-#define HANDSHAKE_MSG "START"
-
-typedef enum {
-    SOCKOP_SUCCESS = 0,
-    SOCKOP_ERROR,
-    SOCKOP_DISCONNECTED,
-} SocketOpResult;
-
-SocketOpResult send_trace(int sockfd, EnergyTrace tr);
-SocketOpResult recv_trace(int sockfd, EnergyTrace *tr);
-// ---------------------------------------------------------
 
 Path path = {0};
 
@@ -345,7 +333,7 @@ defer:
 
 }
 
-void pimc_driver(Path path, size_t numSteps, int sockfd, bool collect_positions)
+void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
@@ -380,11 +368,26 @@ void pimc_driver(Path path, size_t numSteps, int sockfd, bool collect_positions)
                 }
             }
 
-            if (sockfd <= 0) continue; 
+            // if (sockfd <= 0) continue;
+            // TODO: if the socket is not open I still want to be able to calculate the mean value
+            // we should calculate statistics on the fly instead of accumulating EVERY energy value 
+
             if (trace.energies.count == send_size) {
-                // @TODO: what if send was unsuccessful?
-                send_trace(sockfd, trace.energies); 
-                trace.energies.count = 0;
+                if (ctx.rank > 0) {
+                    MPI_Send(trace.energies.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+                    trace.energies.count = 0;
+                } else {
+                    send_trace(sockfd, trace.energies); 
+                    trace.energies.count = 0;
+
+                    MPI_Status status = {0}; 
+                    for (int i = 1; i < ctx.size; ++i) {
+                        MPI_Recv(trace.energies.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                        trace.energies.count = send_size;
+                        send_trace(sockfd, trace.energies);
+                        trace.energies.count = 0;
+                    }
+                }
             }
        }
     }
@@ -492,9 +495,9 @@ void update_draw_frame()
     EndDrawing(); 
 }
 
-void subcmd_visualize(const char *program_path, int argc, char **argv)
+void subcmd_visualize(MPI_Context ctx, int argc, char **argv)
 {
-    (void) program_path;
+    (void) ctx;
     (void) argc;
     (void) argv;
 
@@ -540,132 +543,6 @@ void load_resources()
     UnloadFileData(fileData);
 }
 
-      
-
-SocketOpResult send_chars(int sockfd, const char *msg)
-// prepend the char buffer with a "header" 
-{
-    uint32_t msg_length = strlen(msg);
-    if (send(sockfd, &msg_length, sizeof(msg_length), 0) != sizeof(msg_length)) {
-        perror("send");
-        return SOCKOP_ERROR; 
-    }
-    
-    ssize_t sent = send(sockfd, msg, msg_length, 0);
-    if (sent != (ssize_t) msg_length) {
-        perror("send");
-        return SOCKOP_ERROR; 
-    }
-    
-    return SOCKOP_SUCCESS;
-}
-
-SocketOpResult recv_chars(int sockfd, char *buffer)
-{
-    // assume that the message is prepended with a "header" that contains the length of the message 
-    uint32_t msg_length = 0;
-    ssize_t ret = recv(sockfd, &msg_length, sizeof(msg_length), 0);
-    if (ret == 0) {
-        //fprintf(stderr, "[server] connection closed\n");
-        return SOCKOP_DISCONNECTED; 
-    }
-
-    buffer = arena_alloc(&arena, msg_length*sizeof(char));
-    memset(buffer, 0, msg_length*sizeof(char));
-
-    ssize_t r = recv(sockfd, buffer, sizeof(char)*msg_length, 0);
-    if (r != msg_length) {
-        perror("recv");
-        return SOCKOP_ERROR;
-    } 
-
-    return SOCKOP_SUCCESS; 
-} 
-
-SocketOpResult send_trace(int sockfd, EnergyTrace tr)
-{
-    if (send(sockfd, &tr.count, sizeof(tr.count), 0) != sizeof(tr.count)) {
-        perror("send");
-        return SOCKOP_ERROR; 
-    }
-
-    ssize_t sent = send(sockfd, tr.items, tr.count*sizeof(tr.items[0]), 0);
-    if (sent != (ssize_t) (tr.count*sizeof(tr.items[0]) )) {
-        perror("send");
-        return SOCKOP_ERROR; 
-    } 
-
-    return SOCKOP_SUCCESS; 
-}
-
-
-SocketOpResult recv_trace(int sockfd, EnergyTrace *tr)
-{
-    memset(tr, 0, sizeof(EnergyTrace)); 
-
-    ssize_t ret = recv(sockfd, &tr->count, sizeof(tr->count), 0);
-    if (ret == 0) {
-        fprintf(stderr, "[server] connection closed\n");
-        return SOCKOP_DISCONNECTED; 
-    }
-    
-    tr->items = arena_alloc(&arena, tr->count*sizeof(double));
-    memset(tr->items, 0, tr->count*sizeof(double));
-    tr->capacity = tr->count;
-
-    ssize_t r = recv(sockfd, tr->items, sizeof(double)*tr->count, 0);
-    if (r != (ssize_t) (tr->count*sizeof(double))) {
-        perror("recv");
-        return SOCKOP_ERROR; 
-    } 
-
-    return SOCKOP_SUCCESS; 
-}
-
-int start_server()
-// TODO: maybe use non-blocking socket connection to postpone handling the message
-{
-    int server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server_socket < 0) {
-        fprintf(stderr, "ERROR: could not create the server socket\n");
-        exit(1);
-    }
-    
-    unlink(SOCKET_NAME);
-    
-    // bind the socket
-    struct sockaddr_un server_addr;
-    memset(&server_addr, 0, sizeof(struct sockaddr_un));
-
-    server_addr.sun_family = AF_UNIX;
-    strcpy(server_addr.sun_path, SOCKET_NAME);
-
-    int ret;
-    ret = bind(server_socket, (struct sockaddr *) &server_addr, sizeof(server_addr));
-    if (ret < 0) {
-        perror("bind");
-        exit(1);
-    }
-
-    // 5 - connection queues?
-    ret = listen(server_socket, 5);     
-    if (ret < 0) {
-        perror("listen");
-        exit(1);
-    }
-    
-    int data_socket;
-    struct sockaddr_un client_addr;
-    int clen = sizeof(client_addr);
-
-    data_socket = accept(server_socket, (struct sockaddr *) &client_addr, (socklen_t*) &clen);
-    if (data_socket < 0) {
-        perror("accept");
-        exit(1);
-    }
-
-    return data_socket;
-}
 
 gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
 {
@@ -692,43 +569,28 @@ gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
     return new_h;
 }
 
-void subcmd_client(const char *program_path, int argc, char **argv)
+void subcmd_server(MPI_Context ctx, int argc, char **argv)
 {
-    (void) program_path;
+    (void) ctx;
     (void) argc;
     (void) argv;
     
-    int server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-
-    struct sockaddr_un server_addr;
-    server_addr.sun_family = AF_UNIX;
-    strcpy(server_addr.sun_path, SOCKET_NAME);
-
-    if (connect(server_socket, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-        perror("connect");
-        return; 
+    int sockfd = start_server();
+    if (sockfd < 0) {
+        fprintf(stderr, "ERROR: could not start server socket. Exiting...\n");
+        exit(1);
     }
+    printf("Server started.\n");
 
-    if (send_chars(server_socket, HANDSHAKE_MSG) < 0) return;
-        
-    char *msg = NULL;
-    SocketOpResult r = recv_chars(server_socket, msg);
-    switch (r) {
-        case SOCKOP_ERROR: exit(1);
-        case SOCKOP_DISCONNECTED: return; 
-        case SOCKOP_SUCCESS:
-    } 
-
-    if (msg && (strcmp(msg, HANDSHAKE_MSG) != 0)) {
-        fprintf(stderr, "[client] Connection is not established\n");
-        return; 
-    }
+    bool socket_closed = false; 
 
     double beta;
     size_t numTimeSlices;
-    recv(server_socket, &beta, sizeof(double), 0);
-    recv(server_socket, &numTimeSlices, sizeof(size_t), 0);
-    
+    int nclients;
+    recv(sockfd, &beta, sizeof(double), 0);
+    recv(sockfd, &numTimeSlices, sizeof(size_t), 0);
+    recv(sockfd, &nclients, sizeof(int), 0); 
+
     double en_exact = SHOExact(beta);
     EnergyTrace tr = {0};
 
@@ -741,7 +603,7 @@ void subcmd_client(const char *program_path, int argc, char **argv)
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     
     size_t factor = 80;
-    InitWindow(16*factor, 9*factor, "Client");
+    InitWindow(16*factor, 9*factor, "server");
     SetExitKey(KEY_Q);
    
     load_resources();
@@ -838,6 +700,10 @@ void subcmd_client(const char *program_path, int argc, char **argv)
             };
 
             const char *buffer;
+            buffer = TextFormat("clients: %d", nclients);
+            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+
+            stats_pos.y += font_size; 
             buffer = TextFormat("beta: %.2f", beta);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
             
@@ -878,46 +744,51 @@ void subcmd_client(const char *program_path, int argc, char **argv)
         }
 
         EndDrawing();
-        
-        // @TODO: recv in non-blocking mode to still have client in responsive state  
-        SocketOpResult r = recv_trace(server_socket, &tr);
-        switch (r) {
-            case SOCKOP_DISCONNECTED: continue; 
-            case SOCKOP_ERROR: break;
-            case SOCKOP_SUCCESS: 
-        };
+       
+        if (!socket_closed) { 
+            // @TODO: recv in non-blocking mode to still have the application responsive 
+            SocketOpResult r = recv_trace(sockfd, &tr);
+
+            switch (r) {
+                case SOCKOP_DISCONNECTED:
+                    fprintf(stderr, "Socket closed\n");
+                    socket_closed = true;
+                    continue; 
+                case SOCKOP_ERROR: break;
+                case SOCKOP_SUCCESS: 
+            };
      
-        for (size_t i = 0; i < tr.count; ++i) {
-            while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
-                h = gsl_histogram_extend(h);
-                printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
-            } 
-            gsl_histogram_increment(h, tr.items[i]);
+            for (size_t i = 0; i < tr.count; ++i) {
+                while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
+                    h = gsl_histogram_extend(h);
+                    printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                } 
+                gsl_histogram_increment(h, tr.items[i]);
+            }
+
+            samples_count += tr.count;
         }
-        samples_count += tr.count;
 
         arena_reset(&arena); 
     }
 
-    close(server_socket);
+    close(sockfd);
     arena_free(&arena);
     gsl_histogram_free(h);
 }
 
 
-void subcmd_run(const char *program_path, int argc, char **argv)
+void subcmd_run(MPI_Context ctx, int argc, char **argv)
 {
-    (void) program_path;
-  
-    bool opt_server = false; 
+    bool opt_client = false; 
     bool opt_position_histogram = false;
 
     if (argc > 0) {
         char *opt = shift(&argc, &argv);
 
-        if (strcmp(opt, "--server") == 0) {
-            fprintf(stdout ,"-- Start the server\n");
-            opt_server = true;
+        if (strcmp(opt, "--client") == 0) {
+            fprintf(stdout ,"> start communicating to the server\n");
+            opt_client = true;
         } else if (strcmp(opt, "--position_histogram") == 0) {
             fprintf(stdout, "-- Collecting positions in the histogram\n");
             opt_position_histogram = true; 
@@ -935,40 +806,36 @@ void subcmd_run(const char *program_path, int argc, char **argv)
     mt_seed32(seed);
     
     path.numParticles = 1;
-    path.numTimeSlices = 128;
+    path.numTimeSlices = 64;
     path.beta = 10.0;
     path.tau = path.beta/path.numTimeSlices;
 
-    int sockfd = 0;
-    if (opt_server) {
-        sockfd = start_server();
-       
-        char *msg = NULL;
-        do {
-            SocketOpResult r = recv_chars(sockfd, msg);
-            switch (r) {
-                case SOCKOP_ERROR: exit(1);
-                case SOCKOP_DISCONNECTED: { 
-                    sockfd = 0;
-                    break;
-                }
-                case SOCKOP_SUCCESS:
-            }
-        } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
+    printf("ctx.rank = %d, size = %d\n", ctx.rank, ctx.size);
 
-        if (send_chars(sockfd, HANDSHAKE_MSG) < 0) return; 
-    
-        send(sockfd, &path.beta, sizeof(double), 0);
-        send(sockfd, &path.numTimeSlices, sizeof(size_t), 0);
+    int sockfd = 0;
+    if (opt_client && (ctx.rank == 0)) {
+        sockfd = start_client();
+        printf("[client %d] connection established at socket = %d\n", ctx.rank, sockfd);
+
+        if (sockfd > 0) {
+            send(sockfd, &path.beta, sizeof(double), 0);
+            send(sockfd, &path.numTimeSlices, sizeof(size_t), 0);
+            send(sockfd, &ctx.size, sizeof(int), 0);
+        } else {
+            fprintf(stderr, "ERROR: client %d could not connect to server\n", ctx.rank);
+            fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
+        }
     }
 
     alloc_beads(&path);
-
-    printf("Simulation parameters:\n");
-    printf("Number of Particles   = %zu\n", path.numParticles);
-    printf("Number of Time Slices = %zu\n", path.numTimeSlices);
-    printf("beta                  = %.3lf\n", path.beta);
-    printf("tau                   = %.3lf\n", path.tau);
+    
+    if (ctx.rank == 0) {
+        printf("Simulation parameters:\n");
+        printf("Number of Particles   = %zu\n", path.numParticles);
+        printf("Number of Time Slices = %zu\n", path.numTimeSlices);
+        printf("beta                  = %.3lf\n", path.beta);
+        printf("tau                   = %.3lf\n", path.tau);
+    }
 
     for (size_t i = 0; i < path.numTimeSlices; ++i) {
         for (size_t j = 0; j < path.numParticles; ++j) {
@@ -977,7 +844,7 @@ void subcmd_run(const char *program_path, int argc, char **argv)
     }
     
     size_t MC_steps = 100 * 1000 * 1000;
-    pimc_driver(path, MC_steps, sockfd, true);
+    pimc_driver(ctx, path, MC_steps, sockfd, true);
 
     int binSize = 500;
     Stats s = getStatsEx(trace.energies, binSize);
@@ -1032,26 +899,34 @@ void subcmd_run(const char *program_path, int argc, char **argv)
 
 int main(int argc, char *argv[])
 {
+    MPI_Init(&argc, &argv);
+    
+    MPI_Context ctx = {0}; 
+    MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
+
     char *program_path = shift(&argc, &argv);
 
     if (argc <= 0) {
-        usage(program_path, subcmds, SUBCMDS_COUNT);
+        usage(program_path, (Subcmd*) subcmds, SUBCMDS_COUNT);
         fprintf(stderr, "ERROR: no subcommand is provided\n");
         exit(1);
     }
 
     const char *subcmd_id = shift(&argc, &argv);
-    Subcmd *subcmd = find_subcmd_by_id(subcmds, SUBCMDS_COUNT, subcmd_id);
+    MPI_Subcmd *subcmd = (MPI_Subcmd*) find_subcmd_by_id((Subcmd*) subcmds, SUBCMDS_COUNT, subcmd_id);
 
     if (subcmd != NULL) {
-        subcmd->run(program_path, argc, argv);
+        subcmd->run(ctx, argc, argv);
     } else {
-        usage(program_path, subcmds, SUBCMDS_COUNT);
+        usage(program_path, (Subcmd*) subcmds, SUBCMDS_COUNT);
         fprintf(stderr, "ERROR: unknown subcommand  `%s`\n", subcmd_id);
         exit(1);
     }
 
     arena_free(&arena);
+
+    MPI_Finalize();
 
     return 0;
 }
@@ -1072,8 +947,3 @@ int main2()
     return 0;
 
 }
-
-
-
-// TODO: 
-// -- MPI
