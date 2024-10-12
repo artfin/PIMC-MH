@@ -58,6 +58,8 @@ typedef struct {
     double beta;
 } Path;
 
+void load_resources();
+
 #ifdef COMMON_IMPLEMENTATION
 
 Subcmd *find_subcmd_by_id(Subcmd *subcmds, size_t subcmds_count, const char *id) 
@@ -96,6 +98,21 @@ char* shift(int *argc, char ***argv)
     *argv += 1;
 
     return result; 
+}
+
+void load_resources()
+{
+    int fileSize = 0;
+    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
+
+    font.baseSize = FONT_SIZE_LOAD;
+    font.glyphCount = 95;
+    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
+    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
+    font.texture = LoadTextureFromImage(atlas);
+
+    UnloadImage(atlas);
+    UnloadFileData(fileData);
 }
 
 

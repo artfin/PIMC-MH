@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #ifdef USE_UNIX_SOCKET
 #include <sys/un.h>
