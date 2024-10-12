@@ -100,6 +100,7 @@ char* shift(int *argc, char ***argv)
     return result; 
 }
 
+#ifndef NO_VISUALIZE
 void load_resources()
 {
     int fileSize = 0;
@@ -114,7 +115,7 @@ void load_resources()
     UnloadImage(atlas);
     UnloadFileData(fileData);
 }
-
+#endif
 
 #endif // COMMON_IMPLEMENTATION
 

@@ -10,19 +10,23 @@
 #include <unistd.h>
 #include <inttypes.h>
 
+#define SERVER_IP "192.168.1.3"
+
 #ifndef NO_MPI
 #include <mpi.h>
 #endif
 
 // TODO: can the code for gsl_histogram be extracted and brought in the repo? 
-#ifndef NO_GSL
+#ifndef NO_VISUALIZE
 #include <gsl/gsl_histogram.h>
-#endif
-
 #include "raylib.h"
 
 #define FONT_SIZE_LOAD 160 
 Font font = {0};
+
+#define COLOR_BACKGROUND GetColor(0x181818FF)
+#endif
+
 
 #define MT_GENERATE_CODE_IN_HEADER 0
 #include "mtwist.h"
@@ -58,7 +62,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv);
 void subcmd_server(MPI_Context ctx, int argc, char **argv);
 
 MPI_Subcmd subcmds[] = {
-#ifndef NO_GSL
+#ifndef NO_VISUALIZE
     DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
 #endif
     DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
@@ -428,8 +432,7 @@ void dealloc_beads(Path *path)
     free(path->beads);
 }
 
-#define COLOR_BACKGROUND GetColor(0x181818FF)
-
+#ifndef NO_VISUALIZE
 void update_draw_frame()
 {
     static int simulation_step = 0; 
@@ -538,6 +541,7 @@ void subcmd_visualize(MPI_Context ctx, int argc, char **argv)
 
     CloseWindow();
 }
+#endif
 
 void subcmd_run(MPI_Context ctx, int argc, char **argv)
 {
@@ -575,7 +579,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
 
     int sockfd = 0;
     if (opt_client && (ctx.rank == 0)) {
-        sockfd = start_client();
+        sockfd = start_client(SERVER_IP);
         printf("[client %d] connection established at socket = %d\n", ctx.rank, sockfd);
 
         if (sockfd > 0) {

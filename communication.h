@@ -74,7 +74,7 @@ SocketOpResult recv_trace(int sockfd, EnergyTrace *tr)
     return SOCKOP_SUCCESS; 
 }
 
-int start_client()
+int start_client(const char *server_ip)
 {
     int sockfd = socket(SOCKET_TYPE, SOCK_STREAM, 0);
 
@@ -88,7 +88,7 @@ int start_client()
     server_addr.sin_port = htons(PORT);
 
     // set ip in binary form
-    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
         perror("inet_pton");
         exit(1);
     }
@@ -176,7 +176,7 @@ int start_server()
         switch (r) {
             case SOCKOP_ERROR: exit(1);
             case SOCKOP_DISCONNECTED: exit(1); 
-            case SOCKOP_SUCCESS:
+            case SOCKOP_SUCCESS: break;
         }
     } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
     printf("server: received hanshake\n");
