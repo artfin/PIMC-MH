@@ -10,7 +10,9 @@
 #include <unistd.h>
 #include <inttypes.h>
 
+#ifndef NO_MPI
 #include <mpi.h>
+#endif
 
 // TODO: can the code for gsl_histogram be extracted and brought in the repo? 
 #ifndef NO_GSL
@@ -377,13 +379,17 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
             // we should calculate statistics on the fly instead of accumulating EVERY energy value 
 
             if (trace.energies.count == send_size) {
+#ifndef NO_MPI
                 if (ctx.rank > 0) {
                     MPI_Send(trace.energies.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
                     trace.energies.count = 0;
-                } else {
+                } else 
+#endif // NO_MPI
+                {
                     send_trace(sockfd, trace.energies); 
                     trace.energies.count = 0;
 
+#ifndef NO_MPI
                     MPI_Status status = {0}; 
                     for (int i = 1; i < ctx.size; ++i) {
                         MPI_Recv(trace.energies.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
@@ -391,6 +397,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                         send_trace(sockfd, trace.energies);
                         trace.energies.count = 0;
                     }
+#endif // NO_MPI
                 }
             }
        }
@@ -653,11 +660,18 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
 
 int main(int argc, char *argv[])
 {
+#ifndef NO_MPI
     MPI_Init(&argc, &argv);
-    
+
     MPI_Context ctx = {0}; 
     MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
     MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
+#else
+    MPI_Context ctx = {
+        .rank = 0,
+        .size = 1,
+    };
+#endif
 
     char *program_path = shift(&argc, &argv);
 
@@ -680,7 +694,9 @@ int main(int argc, char *argv[])
 
     arena_free(&arena);
 
+#ifndef NO_MPI
     MPI_Finalize();
+#endif
 
     return 0;
 }
