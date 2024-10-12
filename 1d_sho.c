@@ -12,7 +12,10 @@
 
 #include <mpi.h>
 
+// TODO: can the code for gsl_histogram be extracted and brought in the repo? 
+#ifndef NO_GSL
 #include <gsl/gsl_histogram.h>
+#endif
 
 #include "raylib.h"
 
@@ -53,7 +56,9 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv);
 void subcmd_server(MPI_Context ctx, int argc, char **argv);
 
 MPI_Subcmd subcmds[] = {
+#ifndef NO_GSL
     DEFINE_SUBCMD(visualize, "Visualize the chain modifications"),
+#endif
     DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
 };
 #define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
@@ -609,14 +614,13 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     double err = fabs(s.mean - en_exact) / en_exact;
     printf("Error: %.2f%%\n", err*100.0);
    
-     
+    /* 
     if (opt_position_histogram) {
         gsl_histogram *p_histogram;
 
         size_t nbins = 50;
         p_histogram = gsl_histogram_alloc(nbins);
         gsl_histogram_set_ranges_uniform(p_histogram, -1.0, 1.0);
-
 
         for (size_t i = 0; i < trace.positions.count; ++i) {
             gsl_histogram_increment(p_histogram, trace.positions.items[i]);
@@ -639,6 +643,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
         // draw_histogram("Position histogram", p_histogram);
         // gsl_histogram_free(p_histogram);
     }
+    */
 
     free(trace.energies.items);
     free(trace.positions.items);
