@@ -347,7 +347,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
     size_t equilSkip = 20000;
     size_t observableSkip = 400;
 
-    size_t send_size = 1000;
+    size_t send_size = 100;
+    assert(send_size <= 100 && " NOTE: keep the send_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
 
     printf("Total MC steps: %zu\n", numSteps);
     printf("Equilibration skip: %zu\n", equilSkip);

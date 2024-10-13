@@ -71,10 +71,10 @@ int main()
     bool socket_closed = false; 
 
     double beta;
-    size_t numTimeSlices;
+    int numTimeSlices;
     int nclients;
     recvDouble(sockfd, &beta);
-    recvInt(sockfd, (int*) &numTimeSlices);
+    recvInt(sockfd, &numTimeSlices);
     recvInt(sockfd, &nclients); 
 
     double en_exact = SHOExact(beta);
@@ -194,7 +194,7 @@ int main()
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
             
             stats_pos.y += font_size; 
-            buffer = TextFormat("time slices: %zu", numTimeSlices);
+            buffer = TextFormat("time slices: %d", numTimeSlices);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
 
             stats_pos.y += font_size; 
