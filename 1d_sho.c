@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <inttypes.h>
 
-#define SERVER_IP "192.168.1.3"
 
 #ifndef NO_MPI
 #include <mpi.h>
@@ -89,14 +88,12 @@ typedef struct {
 PIMC_Trace trace = {0};
 
 //#define USE_UNIX_SOCKET
-#define COMMUNICATION_IMPLEMENTATION
-#include "communication.h"
+#define PROTOCOL_IMPLEMENTATION 
+#include "protocol.h"
 
 // ---------------------------------------------------------
 double lam = 0.5; // hbar^2/2m k_B
 // ---------------------------------------------------------
-
-
 
 Path path = {0};
 
@@ -390,15 +387,16 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                 } else 
 #endif // NO_MPI
                 {
-                    send_trace(sockfd, trace.energies); 
+                    sendDoubleArray(sockfd, trace.energies.items, trace.energies.count); 
                     trace.energies.count = 0;
+                    printf("Sending energies...\n");
 
 #ifndef NO_MPI
                     MPI_Status status = {0}; 
                     for (int i = 1; i < ctx.size; ++i) {
                         MPI_Recv(trace.energies.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                         trace.energies.count = send_size;
-                        send_trace(sockfd, trace.energies);
+                        sendDoubleArray(sockfd, trace.energies.items, trace.energies.count);
                         trace.energies.count = 0;
                     }
 #endif // NO_MPI
@@ -579,13 +577,13 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
 
     int sockfd = 0;
     if (opt_client && (ctx.rank == 0)) {
-        sockfd = start_client(SERVER_IP);
+        sockfd = initClient();
         printf("[client %d] connection established at socket = %d\n", ctx.rank, sockfd);
 
         if (sockfd > 0) {
-            send(sockfd, &path.beta, sizeof(double), 0);
-            send(sockfd, &path.numTimeSlices, sizeof(size_t), 0);
-            send(sockfd, &ctx.size, sizeof(int), 0);
+            sendDouble(sockfd, path.beta);
+            sendInt(sockfd, (int) path.numTimeSlices);
+            sendInt(sockfd, ctx.size);
         } else {
             fprintf(stderr, "ERROR: client %d could not connect to server\n", ctx.rank);
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
