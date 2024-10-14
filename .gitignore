@@ -1,3 +1,7 @@
 *.o
 *.swp
 *.exe
+animation_curve.c
+gui_curve_editor.h
+raygui-4.0/
+TAGS

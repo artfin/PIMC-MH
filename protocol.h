@@ -20,7 +20,7 @@
 #define HANDSHAKE_MSG "START"
 
 #define SERVER_IP "127.0.0.1"
-#define PORT 6969
+#define PORT 6969 
 
 typedef enum {
     SOCKOP_SUCCESS = 0,
@@ -198,7 +198,7 @@ int initServer(bool verbose)
 
 #ifndef USE_UNIX_SOCKET
     if (_verbose) {
-        printf("Connection accepted from client IP address %s and %d\n",
+        printf("Connection accepted from client IP address %s:%d\n",
                 inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     }
 #endif

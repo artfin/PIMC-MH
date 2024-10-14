@@ -6,7 +6,10 @@
 
 #include <gsl/gsl_histogram.h>
 
-#include <raylib.h>
+#define RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT 32 
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+#include "styles/dark/style_dark.h"
 
 #define COLOR_BACKGROUND GetColor(0x181818FF)
 #define FONT_SIZE_LOAD 160 
@@ -93,7 +96,13 @@ int main()
     SetExitKey(KEY_Q);
    
     load_resources();
-    int font_size = 24;
+    int font_size = 24; 
+
+    GuiLoadStyleDark();
+
+    font.baseSize = 100; // @hack: increase the font size for GuiLabel
+    GuiSetFont(font);
+    font.baseSize = FONT_SIZE_LOAD;  
 
     SetTargetFPS(60);
 
@@ -113,6 +122,8 @@ int main()
         double xmax = h->range[nbins];
          
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
+    
+        Rectangle settingsRect = (Rectangle){ screen_width - screen_width/3, 0, screen_width/3, screen_height };
 
         Rectangle world = {
             .x = 0.1*screen_width, 
@@ -180,19 +191,45 @@ int main()
        
         // Statistics 
         if (samples_count > 0) {
-            Vector2 stats_pos = { 
-                .x = world.x + world.width + 50, 
-                .y = world.y 
-            };
+            GuiWindowBox(settingsRect, "Settings");
 
-            const char *buffer;
-            buffer = TextFormat("clients: %d", nclients);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            stats_pos.y += font_size; 
-            buffer = TextFormat("beta: %.2f", beta);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+            int margin = 15;
+            Rectangle r = (Rectangle) { settingsRect.x + margin, settingsRect.y + RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + margin, settingsRect.width, font_size };
             
+            GuiLabel(r, TextFormat("clients: %d", nclients));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("beta: %.2f", beta));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("time slices: %d", numTimeSlices));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("Samples: %zu", samples_count));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("Number of bins: %zu", nbins));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("Mean energy: %.5f", mean));
+            r.height += font_size + margin;
+            
+            GuiLabel(r, TextFormat("Exact energy: %.5f", en_exact));
+            r.height += font_size + margin;
+            
+            double exp_error = sigma/sqrt(samples_count);
+            GuiLabel(r, TextFormat("Error estimate: %.5f", exp_error));
+            r.height += font_size + margin;
+            
+            double actual_error = mean - en_exact; 
+            GuiLabel(r, TextFormat("Actual error: %.5f", actual_error));
+            r.height += font_size + margin;
+            
+            double rel_error = fabs(actual_error) / en_exact;
+            GuiLabel(r, TextFormat("Relative error: %.2f%%", rel_error*100.0));
+            r.height += font_size + margin;
+
+            /*
             stats_pos.y += font_size; 
             buffer = TextFormat("time slices: %d", numTimeSlices);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
@@ -227,6 +264,7 @@ int main()
             stats_pos.y = stats_pos.y + font_size;    
             buffer = TextFormat("Relative error: %.2f%%", rel_error*100.0);
             DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
+            */
         }
 
         EndDrawing();

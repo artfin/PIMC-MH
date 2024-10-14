@@ -9,6 +9,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <libssh2.h>
+#include <lissh2_publickey.h>
+//#include <libssh2_sftp.h>
+
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
 static Arena arena = {0};
@@ -20,18 +24,57 @@ static Arena arena = {0};
 
 int main()
 {
-    int server_fd;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    // local end of the tunnel 
+    int local_socket; 
+    if ((local_socket = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(1);
     }
 
+    int remote_socket;
+    if ((remote_socket = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("socket failed");
+        exit(1);
+    }
+
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    address.sin_port = htons(22);
+    
+    inet_pton(AF_INET, "10.62.5.57", &address.sin_addr);
+    if (connect(remote_socket, (struct sockaddr*) address, addrlen) < 0) {
+        perror("connect");
+        exit(1);
+    }
+
+    // Initialize the SSH session
+    libssh2_session *session = libssh2_session_init();
+    if (session == NULL) {
+        perror("libssh2_session_init");
+        exit(1);
+    }
+
+    // Authenticate with the SSH server
+    if (libssh2_userauth_password(session, "a.finenko", "1hpTPyvJew6v") != 0) {
+        perror("libssh2_userauth_password");
+        exit(1);
+    }
+
+    // create a channel for the SSH connection
+    libssh2_channel *channel = libssh2_channel_open_session(session);
+    if (channel == NULL) {
+        perror("libssh2_channel_open_session failed");
+        exit(1);
+    }
+
+    // Create a channel for the forwarded connection
+    libssh2_channel *forward_channel = libssh2_channel_forward_listen_ex(session, "localhost", PORT, &local_socket);
+    if (forward_channel == NULL) {
+        perror("libssh2_channel_forward_listen_ex failed");
+        exit(1);
+    }
 
     if (bind(server_fd, (struct sockaddr*) &address, addrlen) < 0) {
         perror("bind failed");
