@@ -1,7 +1,8 @@
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <stdint.h>
 #include <unistd.h>
-#include <errno.h>
 #include <fcntl.h>
 
 #ifdef USE_UNIX_SOCKET
@@ -39,21 +40,9 @@ typedef enum {
 
 typedef enum {
     MSG_CHAR = 0,
-    MSG_INT,
-    MSG_DOUBLE, 
+    MSG_INT32,
+    MSG_FLOAT64,
 } MessageKind;
-
-typedef struct {
-    MessageKind kind;
-    int length;
-} MessageHeader;  
-
-// Keep in mind 'flexible array member'?
-typedef struct {
-    uint32_t bytes_length; // 4 bytes
-    MessageKind kind;      // 4 bytes
-    void *payload;         // 8 bytes
-} Message;
 
 
 // TODO: send named messages: name+value
@@ -64,39 +53,48 @@ typedef struct {
 // but this would mean that we should change the code for a server if a different client would want to add another field in the 'state' structure.
 // So named parameter approach seems to be better.. 
 
-#define HEADER_SIZE sizeof(MessageHeader)
 
 static bool _verbose = true;
 static char *_client_ip = NULL; // deallocation?
 
+// --------------------
 static int server_socket = 0;
 
-int initClient();
-
-void initServer();
 ConnectionStatus acceptClientConnection(int *data_socket);
+void initServer();
+
+char *get_client_ip();
+// --------------------
+
+// --------------------
+int initClient();
+// --------------------
 
 void set_verbose(bool flag); 
-char *get_client_ip();
+
+// sizeof(Message) = 8
+typedef struct {
+    uint32_t size;      // [4 bytes] the length in bytes of [size + kind + payload] = 8 + [payload] 
+    MessageKind kind;   // [4 bytes]
+    uint8_t payload[];  // [0 bytes (if empty)]
+} __attribute__((packed)) Message;
 
 // serialize: message -> bytes stream
 // deserialize: bytes stream -> message
-void serialize_message(Message *message, uint8_t **bytes, uint32_t *bytes_length);
-Message deserialize_message(uint8_t *bytes, uint32_t bytes_length);
+// void serialize_message(Message *message, uint32_t *bytes_length, uint8_t **bytes); // TODO: what is the approach here? 
+Message* deserialize_message(MessageKind kind, uint32_t bytes_length, uint8_t *bytes);
 
-// TODO: save sockfd in the local state?
-SocketOpResult sendChars(int sockfd, const char *msg);
-SocketOpResult recvChars(int sockfd, char *buffer);
+SocketOpResult sendFloat64Array(int sockfd, double *data, size_t count);
+SocketOpResult recvFloat64Array(int sockfd, double **data, size_t *count);
 
-SocketOpResult sendDoubleArray(int sockfd, double *data, size_t count);
-SocketOpResult recvDoubleArray(int sockfd, double **data, size_t *count);
+SocketOpResult sendInt32(int sockfd, int32_t value);
+SocketOpResult recvInt32(int sockfd, int32_t *value);
 
-SocketOpResult sendInt(int sockfd, int value);
-SocketOpResult recvInt(int sockfd, int *value);
+SocketOpResult sendFloat64(int sockfd, double value);
+SocketOpResult recvFloat64(int sockfd, double *value);
 
-SocketOpResult sendDouble(int sockfd, double value);
-SocketOpResult recvDouble(int sockfd, double *value);
-
+SocketOpResult sendFixedLengthString(int sockfd, const char *buffer);
+SocketOpResult recvFixedLengthString(int sockfd, char **buffer, size_t *count);
 
 #ifdef PROTOCOL_IMPLEMENTATION 
 
@@ -109,42 +107,167 @@ char *get_client_ip() {
     return _client_ip;
 }
 
-/*
-SocketOpResult recv_trace(int sockfd, EnergyTrace *tr)
+Message* deserialize_message(MessageKind kind, uint32_t payload_length, uint8_t *payload)
 {
-    memset(tr, 0, sizeof(EnergyTrace)); 
+    Message *message = (Message*) arena_alloc(&arena, sizeof(message) + payload_length); 
+    message->size = sizeof(message) + payload_length;
+    message->kind = kind;
+    memcpy(message->payload, payload, payload_length); 
 
-    size_t count = 0;
-    ssize_t ret = recv(sockfd, &count, sizeof(count), 0);
-    if (ret == 0) {
-        return SOCKOP_DISCONNECTED;
-    }
-    if (errno > 0) {
-        printf("Error on receving trace size: %s\n", strerror(errno));
+    return message; 
+}
+
+SocketOpResult w_send(int sockfd, const void *buf, size_t len) {
+    ssize_t bytes_sent = send(sockfd, buf, len, 0);
+    if (bytes_sent != (ssize_t) len) {
+        perror("send");
         return SOCKOP_ERROR;
-    } 
+    }
+
+    return SOCKOP_SUCCESS;
+} 
+
+SocketOpResult w_recv(int sockfd, void *buf, size_t len) {
+    ssize_t bytes_recv = recv(sockfd, buf, len, 0);
+    if (bytes_recv == -1) {
+        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+            return SOCKOP_WAITING; 
+        } else {
+            perror("recv");
+            return SOCKOP_ERROR;
+        }
+    }
+    if (bytes_recv != (ssize_t) len) {
+        return SOCKOP_ERROR;
+    }
+
+    return SOCKOP_SUCCESS;
+}
+
+SocketOpResult sendInt32(int sockfd, int32_t value)
+{
+    Message *msg = deserialize_message(MSG_INT32, sizeof(int), (uint8_t*) &value);
+    return w_send(sockfd, msg, msg->size);
+}
+
+SocketOpResult recvInt32(int sockfd, int32_t *value)
+{
+    size_t sz = sizeof(Message) + sizeof(int);
     
-    printf("Requesting to alloc %zu bytes\n", count);
-    tr->items = arena_alloc(&arena, count*sizeof(double));
-    memset(tr->items, 0, count*sizeof(double));
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    
+    SocketOpResult res = w_recv(sockfd, bytes, sz);
+    if (res != SOCKOP_SUCCESS) return res; 
 
-    ssize_t r = recv(sockfd, tr->items, sizeof(double)*count, 0);
-    if (r != (ssize_t) (count*sizeof(double))) {
-        perror("recv");
-        return SOCKOP_ERROR; 
-    }
-
-    if (errno > 0) {
-        printf("Error on receiving trace: %s\n", strerror(errno));
-    }
-
-    tr->count = count; 
-    tr->capacity = count;
-    printf("Successfully received %zu elements of trace\n", tr->count);
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_INT32);
+    memcpy(value, msg->payload, sizeof(int));
+    
+    if (_verbose) {
+        printf("(recvInt32): message contents = [int] %d\n", *value);
+    } 
 
     return SOCKOP_SUCCESS; 
+} 
+
+SocketOpResult sendFloat64(int sockfd, double value)
+{
+    Message *msg = deserialize_message(MSG_FLOAT64, sizeof(double), (uint8_t*) &value); 
+    return w_send(sockfd, msg, msg->size); 
 }
-*/
+
+SocketOpResult recvFloat64(int sockfd, double *value)
+{
+    size_t sz = sizeof(Message) + sizeof(double);
+
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    
+    SocketOpResult res = w_recv(sockfd, bytes, sz);
+    if (res != SOCKOP_SUCCESS) return res; 
+
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_FLOAT64);
+    memcpy(value, msg->payload, sizeof(double));
+
+    if (_verbose) {
+        printf("(recvFloat64): message contents = [double] %.3lf\n", *value);
+    } 
+
+    return SOCKOP_SUCCESS; 
+} 
+
+SocketOpResult sendFloat64Array(int sockfd, double *data, size_t count)
+{
+    Message *msg = deserialize_message(MSG_FLOAT64, count*sizeof(double), (uint8_t*) data);
+    return w_send(sockfd, msg, msg->size); 
+}
+
+SocketOpResult recvFloat64Array(int sockfd, double **data, size_t *count)
+{
+    SocketOpResult res;
+    uint32_t sz;
+    
+    res = w_recv(sockfd, &sz, sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res; 
+    
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    memcpy(bytes, &sz, sizeof(uint32_t));
+
+    res = w_recv(sockfd, bytes + sizeof(uint32_t), sz - sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res; 
+    
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_FLOAT64);
+
+    size_t payload_len = sz - sizeof(uint32_t) - sizeof(MessageKind); 
+    assert(payload_len % sizeof(double) == 0);
+    
+    *count = payload_len / sizeof(double);
+    *data = bytes + sizeof(uint32_t) + sizeof(MessageKind);
+
+    if (_verbose) {
+        printf("(recvFloat64Array): message contents = [%zu float64s]: %.3lf ...\n", *count, (*data)[0]);
+    }
+
+    return SOCKOP_SUCCESS; 
+} 
+
+SocketOpResult sendFixedLengthString(int sockfd, const char *buffer)
+{
+    Message *msg = deserialize_message(MSG_CHAR, strlen(buffer)*sizeof(char), (uint8_t*) buffer);
+    return w_send(sockfd, msg, msg->size); 
+}
+
+SocketOpResult recvFixedLengthString(int sockfd, char **buffer, size_t *count)
+{
+    SocketOpResult res;
+    uint32_t sz;
+    
+    res = w_recv(sockfd, &sz, sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res;
+
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    memcpy(bytes, &sz, sizeof(uint32_t));
+
+    res = w_recv(sockfd, bytes + sizeof(uint32_t), sz - sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res; 
+    
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_CHAR);
+
+    *buffer = bytes + sizeof(uint32_t) + sizeof(MessageKind);
+    *count = sz - sizeof(uint32_t) - sizeof(MessageKind);  
+ 
+    if (_verbose) {
+        printf("(recvFixedLengthString): message contents = [%zu chars]: %.*s\n", *count, (int) *count, *buffer);
+    }
+
+    return SOCKOP_SUCCESS; 
+} 
 
 int initClient()
 {
@@ -171,10 +294,11 @@ int initClient()
         return -1; 
     }
 
-    if (sendChars(sockfd, HANDSHAKE_MSG) < 0) return -1;
+    if (sendFixedLengthString(sockfd, HANDSHAKE_MSG) < 0) return -1;
         
     char *msg = NULL;
-    SocketOpResult r = recvChars(sockfd, msg);
+    size_t msg_length = 0;
+    SocketOpResult r = recvFixedLengthString(sockfd, &msg, &msg_length);
     if (r != SOCKOP_SUCCESS) {
         return -1;
     }
@@ -263,8 +387,9 @@ ConnectionStatus acceptClientConnection(int *data_socket)
 #endif
 
     char *msg = NULL;
+    size_t msg_length = 0;
     do {
-        SocketOpResult r = recvChars(*data_socket, msg);
+        SocketOpResult r = recvFixedLengthString(*data_socket, &msg, &msg_length);
         switch (r) {
             case SOCKOP_ERROR: exit(1);
             case SOCKOP_DISCONNECTED: exit(1); 
@@ -274,202 +399,10 @@ ConnectionStatus acceptClientConnection(int *data_socket)
     } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
     printf("server: received hanshake\n");
 
-    if (sendChars(*data_socket, HANDSHAKE_MSG) < 0) return -1; 
+    if (sendFixedLengthString(*data_socket, HANDSHAKE_MSG) < 0) return -1; 
 
     return CONNECTION_ESTABLISHED; 
 }
-
-SocketOpResult sendChars(int sockfd, const char *msg)
-{
-    ssize_t bytes_sent;
-    uint32_t msg_length = strlen(msg);
-
-    MessageHeader header = {
-        .kind = MSG_CHAR,
-        .length = msg_length, 
-    };
-
-    bytes_sent = send(sockfd, &header, 1*HEADER_SIZE, 0);
-    if (bytes_sent != (ssize_t) HEADER_SIZE) {
-        perror("send");
-        return SOCKOP_ERROR;
-    } 
-
-    bytes_sent = send(sockfd, msg, msg_length*sizeof(char), 0);
-    if (bytes_sent != (ssize_t) msg_length) {
-        perror("send");
-        return SOCKOP_ERROR; 
-    }
-    
-    return SOCKOP_SUCCESS;
-}
-
-SocketOpResult recvChars(int sockfd, char *buffer)
-{
-    MessageHeader header = {0};
-    
-    ssize_t bytes_recv = recv(sockfd, &header, 1*HEADER_SIZE, 0);
-    assert(bytes_recv == HEADER_SIZE);
-    assert(header.kind == MSG_CHAR); 
-
-    buffer = arena_alloc(&arena, header.length*sizeof(char));
-    memset(buffer, 0, header.length*sizeof(char));
-
-    bytes_recv = recv(sockfd, buffer, header.length*sizeof(char), 0); 
-    if (bytes_recv != (ssize_t) (header.length*sizeof(char))) {
-        perror("recv");
-        return SOCKOP_ERROR;
-    } 
-
-    return SOCKOP_SUCCESS; 
-} 
-
-// TODO: refactor sending the header
-SocketOpResult sendDouble(int sockfd, double value)
-{
-    ssize_t bytes_sent;
-    
-    MessageHeader header = {
-        .kind = MSG_DOUBLE,
-        .length = 1,
-    };
-
-    bytes_sent = send(sockfd, &header, 1*HEADER_SIZE, 0);
-    if (bytes_sent != (ssize_t) HEADER_SIZE) {
-        perror("send");
-        return SOCKOP_ERROR;
-    }
-
-    bytes_sent = send(sockfd, &value, 1*sizeof(double), 0);
-    if (bytes_sent != sizeof(double)) {
-        perror("send");
-        return SOCKOP_ERROR;
-    } 
-
-    return SOCKOP_SUCCESS;
-}
-
-SocketOpResult recvDouble(int sockfd, double *buffer)
-{
-    MessageHeader header = {0};
-    
-    ssize_t bytes_recv = recv(sockfd, &header, 1*HEADER_SIZE, 0);
-    if (bytes_recv == -1) {
-        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-            return SOCKOP_WAITING; 
-        } else {
-            perror("recv");
-            return SOCKOP_ERROR;
-        }
-    } 
-
-    bytes_recv = recv(sockfd, buffer, 1*sizeof(double), 0); 
-    if (bytes_recv != 1*sizeof(double)) {
-        perror("recv");
-        return SOCKOP_ERROR;
-    }
-
-    if (_verbose) {
-        printf("success: received double %.3lf\n", *buffer);
-    } 
-
-    return SOCKOP_SUCCESS; 
-} 
-
-SocketOpResult sendInt(int sockfd, int value)
-{
-    ssize_t bytes_sent;
-    
-    MessageHeader header = {
-        .kind = MSG_INT,
-        .length = 1,
-    };
-
-    bytes_sent = send(sockfd, &header, 1*HEADER_SIZE, 0);
-    if (bytes_sent != (ssize_t) HEADER_SIZE) {
-        perror("send");
-        return SOCKOP_ERROR;
-    }
-
-    bytes_sent = send(sockfd, &value, 1*sizeof(int), 0);
-    if (bytes_sent != sizeof(int)) {
-        perror("send");
-        return SOCKOP_ERROR;
-    } 
-
-    return SOCKOP_SUCCESS;
-}
-
-SocketOpResult recvInt(int sockfd, int *buffer)
-{
-    MessageHeader header = {0};
-    
-    ssize_t bytes_recv = recv(sockfd, &header, 1*HEADER_SIZE, 0);
-    assert(bytes_recv == HEADER_SIZE);
-    assert(header.kind == MSG_INT); 
-
-    bytes_recv = recv(sockfd, buffer, 1*sizeof(int), 0); 
-    if (bytes_recv != 1*sizeof(int)) {
-        perror("recv");
-        return SOCKOP_ERROR;
-    } 
-    
-    if (_verbose) {
-        printf("success: received int %d\n", *buffer);
-    } 
-
-    return SOCKOP_SUCCESS; 
-} 
-
-SocketOpResult sendDoubleArray(int sockfd, double *data, size_t count)
-{
-    ssize_t bytes_sent;
-    
-    MessageHeader header = {
-        .kind = MSG_DOUBLE,
-        .length = (int) count,
-    };
-
-    bytes_sent = send(sockfd, &header, 1*HEADER_SIZE, 0);
-    if (bytes_sent != (ssize_t) HEADER_SIZE) {
-        perror("send");
-        return SOCKOP_ERROR;
-    }
-
-    bytes_sent = send(sockfd, data, count*sizeof(double), 0);
-    if (bytes_sent != (ssize_t) (count*sizeof(double))) {
-        perror("send");
-        return SOCKOP_ERROR;
-    } 
-
-    return SOCKOP_SUCCESS;
-}
-
-SocketOpResult recvDoubleArray(int sockfd, double **data, size_t *count)
-{
-    MessageHeader header = {0};
-    
-    ssize_t bytes_recv = recv(sockfd, &header, 1*HEADER_SIZE, 0);
-    assert(bytes_recv == HEADER_SIZE);
-    assert(header.kind == MSG_DOUBLE); 
-
-    *data = arena_alloc(&arena, header.length*sizeof(double));
-    memset(*data, 0, header.length*sizeof(double));
-
-    bytes_recv = recv(sockfd, *data, header.length*sizeof(double), 0); 
-    if (bytes_recv != (ssize_t) (header.length*sizeof(double))) {
-        perror("recv");
-        return SOCKOP_ERROR;
-    } 
-
-    *count = header.length;
-
-    if (_verbose) {
-        printf("success: received array of double of %d elements: %.3lf ...\n", header.length, (*data)[0]);
-    }
-
-    return SOCKOP_SUCCESS; 
-} 
 
 #endif // PROTOCOL_IMPLEMENTATION 
 

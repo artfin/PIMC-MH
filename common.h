@@ -1,6 +1,7 @@
 #ifndef COMMON_H_
 #define COMMON_H_
 
+
 #define return_defer(value) do { result = (value); goto defer; } while (0)
 
 #define DA_INIT_CAP 256

@@ -28,8 +28,6 @@ typedef struct {
     size_t capacity;
 } Trace;
 
-typedef struct {
-} Props;
 
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
@@ -38,6 +36,10 @@ double SHOExact(double beta) {
     //return 0.5/tanh(0.5/T);
     return 0.5/tanh(0.5*beta);
 }
+
+// TODO: Send a map (?) with a reference value with respect to which we display the difference
+// TODO: Customize the received values from client: we should receive an array of AVERAGES over N values, not raw data 
+// TODO: load the default values for histogram ranges from the configuration file
 
 gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
 {
@@ -76,7 +78,7 @@ int main()
     double beta;
     int numTimeSlices;
     int nclients;
-    double en_exact = 0.0;
+    double refval;
     
     Trace tr = {0};
 
@@ -148,19 +150,18 @@ int main()
         if ((conn == CONNECTION_ESTABLISHED) && !parameters_received) {
             SocketOpResult r;
 
-            r = recvDouble(sockfd, &beta);
+            r = recvFloat64(sockfd, &beta);
             assert(r == SOCKOP_SUCCESS);
-            printf("beta received\n");
 
-            r = recvInt(sockfd, &numTimeSlices);
+            r = recvInt32(sockfd, &numTimeSlices);
             assert(r == SOCKOP_SUCCESS);
-            printf("numTimeSlices received\n");
             
-            r = recvInt(sockfd, &nclients);
+            r = recvInt32(sockfd, &nclients);
             assert(r == SOCKOP_SUCCESS);
-            printf("nclients received\n");
     
-            en_exact = SHOExact(beta);
+            r = recvFloat64(sockfd, &refval); 
+            assert(r == SOCKOP_SUCCESS);
+
             parameters_received = true;
             // TODO: what if the parameters won't be recevied in the same tick?
             // just 'assert' that they do.. otherwise we will need to develop some marking scheme 
@@ -298,21 +299,21 @@ int main()
             GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
             contentRect.height += font_size + margin;
             
-            GuiLabel(contentRect, TextFormat("Mean energy: %.5f", mean));
-            contentRect.height += font_size + margin;
-            
-            GuiLabel(contentRect, TextFormat("Exact energy: %.5f", en_exact));
+            GuiLabel(contentRect, TextFormat("Mean: %.5f", mean));
             contentRect.height += font_size + margin;
             
             double exp_error = sigma/sqrt(samples_count);
             GuiLabel(contentRect, TextFormat("Error estimate: %.5f", exp_error));
             contentRect.height += font_size + margin;
             
-            double actual_error = mean - en_exact; 
+            GuiLabel(contentRect, TextFormat("Reference: %.5f", refval));
+            contentRect.height += font_size + margin;
+            
+            double actual_error = mean - refval; 
             GuiLabel(contentRect, TextFormat("Actual error: %.5f", actual_error));
             contentRect.height += font_size + margin;
             
-            double rel_error = fabs(actual_error) / en_exact;
+            double rel_error = fabs(actual_error) / refval;
             GuiLabel(contentRect, TextFormat("Relative error: %.2f%%", rel_error*100.0));
             contentRect.height += font_size + margin;
         }
@@ -320,14 +321,14 @@ int main()
         EndDrawing();
        
         if (conn == CONNECTION_ESTABLISHED) { 
-            SocketOpResult r = recvDoubleArray(sockfd, &tr.items, &tr.count);
+            SocketOpResult r = recvFloat64Array(sockfd, &tr.items, &tr.count);
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");
                 conn = NO_CONNECTION; 
             }
    
-            printf("extending histogram with %zu elements\n", tr.count); 
+            // printf("extending histogram with %zu elements\n", tr.count); 
             for (size_t i = 0; i < tr.count; ++i) {
                 while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
                     h = gsl_histogram_extend(h);

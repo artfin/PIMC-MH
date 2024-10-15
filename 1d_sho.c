@@ -388,7 +388,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                 } else 
 #endif // NO_MPI
                 {
-                    sendDoubleArray(sockfd, trace.energies.items, trace.energies.count); 
+                    sendFloat64Array(sockfd, trace.energies.items, trace.energies.count); 
                     trace.energies.count = 0;
                     printf("Sending energies...\n");
 
@@ -397,7 +397,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                     for (int i = 1; i < ctx.size; ++i) {
                         MPI_Recv(trace.energies.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                         trace.energies.count = send_size;
-                        sendDoubleArray(sockfd, trace.energies.items, trace.energies.count);
+                        sendFloat64Array(sockfd, trace.energies.items, trace.energies.count);
                         trace.energies.count = 0;
                     }
 #endif // NO_MPI
@@ -573,6 +573,8 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     path.numTimeSlices = 64;
     path.beta = 10.0;
     path.tau = path.beta/path.numTimeSlices;
+    
+    double en_exact = SHOExact(path.beta);
 
     printf("ctx.rank = %d, size = %d\n", ctx.rank, ctx.size);
 
@@ -582,9 +584,10 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
         printf("client: connection established at socket = %d\n", sockfd);
 
         if (sockfd > 0) {
-            sendDouble(sockfd, path.beta);
-            sendInt(sockfd, (int) path.numTimeSlices);
-            sendInt(sockfd, ctx.size);
+            sendFloat64(sockfd, path.beta);
+            sendInt32(sockfd, (int) path.numTimeSlices);
+            sendInt32(sockfd, ctx.size);
+            sendFloat64(sockfd, en_exact);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
@@ -618,7 +621,6 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     double en_err = s.std/sqrt(trace.energies.count); 
     printf("(PIMC) Energy = %.5f +/- %.5f\n", s.mean, en_err); 
     
-    double en_exact = SHOExact(path.beta);
     printf("(Exact) Energy = %.5f\n", en_exact);
     
     double err = fabs(s.mean - en_exact) / en_exact;
