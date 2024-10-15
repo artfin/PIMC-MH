@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #ifdef USE_UNIX_SOCKET
 #include <sys/un.h>
@@ -21,12 +22,20 @@
 
 #define SERVER_IP "127.0.0.1"
 #define PORT 6969 
+#define MAX_CONNECTIONS 5
 
 typedef enum {
     SOCKOP_SUCCESS = 0,
+    SOCKOP_WAITING, 
     SOCKOP_ERROR,
     SOCKOP_DISCONNECTED,
 } SocketOpResult;
+
+typedef enum {
+    NO_CONNECTION,
+    CONNECTION_ESTABLISHED, 
+    CONNECTION_ERROR, // TODO: we may need to return from the 'accept' function to clean up the broken connection
+} ConnectionStatus;
 
 typedef enum {
     MSG_CHAR = 0,
@@ -39,13 +48,41 @@ typedef struct {
     int length;
 } MessageHeader;  
 
+// Keep in mind 'flexible array member'?
+typedef struct {
+    uint32_t bytes_length; // 4 bytes
+    MessageKind kind;      // 4 bytes
+    void *payload;         // 8 bytes
+} Message;
+
+
+// TODO: send named messages: name+value
+//       so that we could assert that the intended value has been received
+//       On a server side we could put them into a map 
+//
+// Also we could built up the 'state' (#clients, beta etc.) and send it as a single structure,
+// but this would mean that we should change the code for a server if a different client would want to add another field in the 'state' structure.
+// So named parameter approach seems to be better.. 
+
 #define HEADER_SIZE sizeof(MessageHeader)
 
 static bool _verbose = true;
+static char *_client_ip = NULL; // deallocation?
 
-// TODO: pass an arena through init functions? 
+static int server_socket = 0;
+
 int initClient();
-int initServer(bool verbose);
+
+void initServer();
+ConnectionStatus acceptClientConnection(int *data_socket);
+
+void set_verbose(bool flag); 
+char *get_client_ip();
+
+// serialize: message -> bytes stream
+// deserialize: bytes stream -> message
+void serialize_message(Message *message, uint8_t **bytes, uint32_t *bytes_length);
+Message deserialize_message(uint8_t *bytes, uint32_t bytes_length);
 
 // TODO: save sockfd in the local state?
 SocketOpResult sendChars(int sockfd, const char *msg);
@@ -60,9 +97,17 @@ SocketOpResult recvInt(int sockfd, int *value);
 SocketOpResult sendDouble(int sockfd, double value);
 SocketOpResult recvDouble(int sockfd, double *value);
 
-// TODO: send named parameter? string+value
 
 #ifdef PROTOCOL_IMPLEMENTATION 
+
+void set_verbose(bool flag) {
+    _verbose = flag;
+}
+
+char *get_client_ip() {
+    assert(_client_ip != NULL);
+    return _client_ip;
+}
 
 /*
 SocketOpResult recv_trace(int sockfd, EnergyTrace *tr)
@@ -142,16 +187,17 @@ int initClient()
     return sockfd;
 }
 
-int initServer(bool verbose)
-// TODO: maybe use non-blocking socket connection to postpone handling the message
+void initServer()
 {
-    _verbose = verbose;
-
-    int server_socket = socket(SOCKET_TYPE, SOCK_STREAM, 0);
+    server_socket = socket(SOCKET_TYPE, SOCK_STREAM, 0);
     if (server_socket < 0) {
         fprintf(stderr, "ERROR: could not create the server socket\n");
         exit(1);
     }
+
+    int flags = fcntl(server_socket, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    fcntl(server_socket, F_SETFL, flags); 
 
 #ifdef USE_UNIX_SOCKET 
     unlink(SOCKET_NAME);
@@ -175,8 +221,7 @@ int initServer(bool verbose)
         exit(1);
     }
 
-    // 5 - connection queues?
-    ret = listen(server_socket, 5);     
+    ret = listen(server_socket, MAX_CONNECTIONS);     
     if (ret < 0) {
         perror("listen");
         exit(1);
@@ -185,38 +230,53 @@ int initServer(bool verbose)
     if (_verbose) { 
         printf("Server listening on port %d...\n", PORT);
     }
- 
+}
+
+// TODO: maybe use non-blocking socket connection to postpone handling the message
+ConnectionStatus acceptClientConnection(int *data_socket)
+{
     SOCKET_ADDR client_addr;
     int clen = SOCKET_ADDR_LEN; 
-    int data_socket;
+    int client_fd = 0;
 
-    data_socket = accept(server_socket, (struct sockaddr *) &client_addr, (socklen_t*) &clen);
-    if (data_socket < 0) {
-        perror("accept");
-        exit(1);
+    client_fd = accept(server_socket, (struct sockaddr *) &client_addr, (socklen_t*) &clen);
+    if (client_fd < 0) {
+        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+            return NO_CONNECTION; 
+        } else {
+            perror("accept");
+            exit(1);
+            // return CLIENT_CONNECTION_ERROR;
+        }
     }
+
+    *data_socket = client_fd;
 
 #ifndef USE_UNIX_SOCKET
     if (_verbose) {
         printf("Connection accepted from client IP address %s:%d\n",
                 inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     }
+    
+    _client_ip = malloc(strlen(inet_ntoa(client_addr.sin_addr)));
+    strcpy(_client_ip, inet_ntoa(client_addr.sin_addr));
 #endif
 
     char *msg = NULL;
     do {
-        SocketOpResult r = recvChars(data_socket, msg);
+        SocketOpResult r = recvChars(*data_socket, msg);
         switch (r) {
             case SOCKOP_ERROR: exit(1);
             case SOCKOP_DISCONNECTED: exit(1); 
             case SOCKOP_SUCCESS: break;
+            case SOCKOP_WAITING: assert(false);
         }
     } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
     printf("server: received hanshake\n");
 
-    if (sendChars(data_socket, HANDSHAKE_MSG) < 0) return -1; 
+    if (sendChars(*data_socket, HANDSHAKE_MSG) < 0) return -1; 
 
-    return data_socket;
+    return CONNECTION_ESTABLISHED; 
 }
 
 SocketOpResult sendChars(int sockfd, const char *msg)
@@ -294,8 +354,14 @@ SocketOpResult recvDouble(int sockfd, double *buffer)
     MessageHeader header = {0};
     
     ssize_t bytes_recv = recv(sockfd, &header, 1*HEADER_SIZE, 0);
-    assert(bytes_recv == HEADER_SIZE);
-    assert(header.kind == MSG_DOUBLE); 
+    if (bytes_recv == -1) {
+        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+            return SOCKOP_WAITING; 
+        } else {
+            perror("recv");
+            return SOCKOP_ERROR;
+        }
+    } 
 
     bytes_recv = recv(sockfd, buffer, 1*sizeof(double), 0); 
     if (bytes_recv != 1*sizeof(double)) {

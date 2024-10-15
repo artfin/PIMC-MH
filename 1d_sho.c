@@ -579,14 +579,14 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     int sockfd = 0;
     if (opt_client && (ctx.rank == 0)) {
         sockfd = initClient();
-        printf("[client %d] connection established at socket = %d\n", ctx.rank, sockfd);
+        printf("client: connection established at socket = %d\n", sockfd);
 
         if (sockfd > 0) {
             sendDouble(sockfd, path.beta);
             sendInt(sockfd, (int) path.numTimeSlices);
             sendInt(sockfd, ctx.size);
         } else {
-            fprintf(stderr, "ERROR: client %d could not connect to server\n", ctx.rank);
+            fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
         }
     }

@@ -26,7 +26,10 @@ typedef struct {
     double *items;
     size_t count;
     size_t capacity;
-} EnergyTrace;
+} Trace;
+
+typedef struct {
+} Props;
 
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
@@ -63,28 +66,23 @@ gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
 
 int main()
 {
-    bool verbose = true;
-    int sockfd = initServer(verbose);
-    if (sockfd < 0) {
-        fprintf(stderr, "ERROR: could not start server socket. Exiting...\n");
-        exit(1);
-    }
-    printf("Connection accepted\n");
+    initServer();
+    set_verbose(true); 
 
-    bool socket_closed = false; 
+    int sockfd = 0;
+    ConnectionStatus conn = NO_CONNECTION; 
+    bool parameters_received = false;
 
     double beta;
     int numTimeSlices;
     int nclients;
-    recvDouble(sockfd, &beta);
-    recvInt(sockfd, &numTimeSlices);
-    recvInt(sockfd, &nclients); 
-
-    double en_exact = SHOExact(beta);
-    EnergyTrace tr = {0};
+    double en_exact = 0.0;
+    
+    Trace tr = {0};
 
     size_t nbins = 20;
     gsl_histogram *h = gsl_histogram_alloc(nbins);
+
     gsl_histogram_set_ranges_uniform(h, -0.5, 0.5);
     size_t samples_count = 0;
 
@@ -104,6 +102,10 @@ int main()
     GuiSetFont(font);
     font.baseSize = FONT_SIZE_LOAD;  
 
+    bool ylogscale = false;    
+    bool editValueBox[2] = { 0 };
+    char valTextBox[2][20] = { 0 };
+
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
@@ -117,10 +119,11 @@ int main()
         double sigma = gsl_histogram_sigma(h);
 
         nbins = h->n;
-        double ymax = gsl_histogram_max_val(h);
         double xmin = h->range[0];
         double xmax = h->range[nbins];
-         
+        double ymax = gsl_histogram_max_val(h);
+        if (ylogscale) ymax = log(ymax);
+
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
     
         Rectangle settingsRect = (Rectangle){ screen_width - screen_width/3, 0, screen_width/3, screen_height };
@@ -133,10 +136,48 @@ int main()
         };
             
         double rect_width = world.width / nbins; 
+   
+        if (conn == NO_CONNECTION) {
+            conn = acceptClientConnection(&sockfd);
 
-        for (size_t i = 0; i < nbins; ++i) {
-            double height = gsl_histogram_get(h, i)/ymax * world.height; 
+            if (conn == CONNECTION_ESTABLISHED) {
+                printf("Connection accepted\n");
+            }
+        } 
+
+        if ((conn == CONNECTION_ESTABLISHED) && !parameters_received) {
+            SocketOpResult r;
+
+            r = recvDouble(sockfd, &beta);
+            assert(r == SOCKOP_SUCCESS);
+            printf("beta received\n");
+
+            r = recvInt(sockfd, &numTimeSlices);
+            assert(r == SOCKOP_SUCCESS);
+            printf("numTimeSlices received\n");
+            
+            r = recvInt(sockfd, &nclients);
+            assert(r == SOCKOP_SUCCESS);
+            printf("nclients received\n");
+    
+            en_exact = SHOExact(beta);
+            parameters_received = true;
+            // TODO: what if the parameters won't be recevied in the same tick?
+            // just 'assert' that they do.. otherwise we will need to develop some marking scheme 
+            // to store the information which parameters have been received and which are still to be awaited 
+        } 
+
+        
+        for (size_t i = 0; i < nbins; ++i) 
+        {
             double factor = 0.9;
+
+            double height;
+            if (ylogscale) { 
+                height = log(gsl_histogram_get(h, i))/ymax * world.height;
+            } else {
+                height = gsl_histogram_get(h, i)/ymax * world.height;
+            }
 
             Rectangle r = {
                 .x = world.x + i*rect_width,
@@ -161,7 +202,7 @@ int main()
             };
             DrawLineEx(mean_st, mean_end, 2.0, RED);
 
-            const char *buffer = TextFormat("%.3lf", mean);
+            const char *buffer = TextFormat("%.3e", mean);
             Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
             Vector2 text_pos = {
                 world.x + (mean - xmin)/(xmax - xmin)*world.width - 0.25*text_len.x,
@@ -171,7 +212,7 @@ int main()
         }
         
         {
-            const char *buffer = TextFormat("%.3lf", xmin);
+            const char *buffer = TextFormat("%.3e", xmin);
             Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
             Vector2 text_pos = {
                 world.x - 0.25 * text_len.x,
@@ -180,7 +221,7 @@ int main()
             DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
         }
         {
-            const char *buffer = TextFormat("%.3lf", xmax);
+            const char *buffer = TextFormat("%.3e", xmax);
             Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
             Vector2 text_pos = {
                 world.x + world.width - 0.25 * text_len.x,
@@ -189,93 +230,101 @@ int main()
             DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
         }
        
-        // Statistics 
-        if (samples_count > 0) {
-            GuiWindowBox(settingsRect, "Settings");
+        GuiWindowBox(settingsRect, "Settings");
+        
+        int margin = 15;
+        Rectangle contentRect = (Rectangle) { settingsRect.x + margin, settingsRect.y + RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + margin, settingsRect.width, font_size };
+        
+        if (conn == NO_CONNECTION) {
+            GuiLabel(contentRect, TextFormat("Waiting for client connection..."));
+            contentRect.y += font_size;
+        }
 
-            int margin = 15;
-            Rectangle r = (Rectangle) { settingsRect.x + margin, settingsRect.y + RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + margin, settingsRect.width, font_size };
+        GuiCheckBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 1.5f*font_size, 1.5f*font_size }, "Y log scale", &ylogscale);
+        contentRect.y += font_size + margin;
+
+        if (conn == NO_CONNECTION) {
+                
+            GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, font_size }, "Histogram ranges");
+            contentRect.y += font_size + margin;
+           
+            // left range 
+            if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[0], 20, editValueBox[0]))
+            {
+                editValueBox[0] = !editValueBox[0];
+
+                // Input ended
+                if (!editValueBox[0]) {
+                    // Try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod(valTextBox[0], &endPtr);
+                    if (endPtr != valTextBox[0]) gsl_histogram_set_ranges_uniform(h, value, xmax);
+                }
+            }
+
+            // right range 
+            if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[1], 20, editValueBox[1]))
+            {
+                editValueBox[1] = !editValueBox[1];
+
+                // Input ended
+                if (!editValueBox[1])
+                {
+                    // Try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod(valTextBox[1], &endPtr);
+                    if (endPtr != valTextBox[1]) gsl_histogram_set_ranges_uniform(h, xmin, value);
+                }
+
+            }
+
+        } else if ((conn == CONNECTION_ESTABLISHED) && parameters_received) {
+            contentRect.height += font_size + 2*margin;
+            GuiLabel(contentRect, TextFormat("Connection established with %s", get_client_ip()));
+            contentRect.height += font_size + 2*margin;
+
+            GuiLabel(contentRect, TextFormat("client processes: %d", nclients));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("clients: %d", nclients));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("beta: %.2f", beta));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("beta: %.2f", beta));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("time slices: %d", numTimeSlices));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("time slices: %d", numTimeSlices));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Samples: %zu", samples_count));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("Samples: %zu", samples_count));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("Number of bins: %zu", nbins));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Mean energy: %.5f", mean));
+            contentRect.height += font_size + margin;
             
-            GuiLabel(r, TextFormat("Mean energy: %.5f", mean));
-            r.height += font_size + margin;
-            
-            GuiLabel(r, TextFormat("Exact energy: %.5f", en_exact));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Exact energy: %.5f", en_exact));
+            contentRect.height += font_size + margin;
             
             double exp_error = sigma/sqrt(samples_count);
-            GuiLabel(r, TextFormat("Error estimate: %.5f", exp_error));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Error estimate: %.5f", exp_error));
+            contentRect.height += font_size + margin;
             
             double actual_error = mean - en_exact; 
-            GuiLabel(r, TextFormat("Actual error: %.5f", actual_error));
-            r.height += font_size + margin;
+            GuiLabel(contentRect, TextFormat("Actual error: %.5f", actual_error));
+            contentRect.height += font_size + margin;
             
             double rel_error = fabs(actual_error) / en_exact;
-            GuiLabel(r, TextFormat("Relative error: %.2f%%", rel_error*100.0));
-            r.height += font_size + margin;
-
-            /*
-            stats_pos.y += font_size; 
-            buffer = TextFormat("time slices: %d", numTimeSlices);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            stats_pos.y += font_size; 
-            buffer = TextFormat("Samples: %zu", samples_count);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-            
-            stats_pos.y += font_size; 
-            buffer = TextFormat("Number of bins: %zu", nbins);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            stats_pos.y += font_size; 
-            buffer = TextFormat("Mean energy: %.5f", mean);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-            
-            stats_pos.y = stats_pos.y + font_size;    
-            buffer = TextFormat("Exact energy: %.5f", en_exact);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            double exp_error = sigma/sqrt(samples_count);
-            stats_pos.y += font_size;
-            buffer = TextFormat("Error estimate: %.5f", exp_error);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            double actual_error = mean - en_exact; 
-            stats_pos.y = stats_pos.y + font_size;    
-            buffer = TextFormat("Actual error: %.5f", actual_error);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-
-            double rel_error = fabs(actual_error) / en_exact;
-            stats_pos.y = stats_pos.y + font_size;    
-            buffer = TextFormat("Relative error: %.2f%%", rel_error*100.0);
-            DrawTextEx(font, buffer, stats_pos, font_size, 0, WHITE);
-            */
+            GuiLabel(contentRect, TextFormat("Relative error: %.2f%%", rel_error*100.0));
+            contentRect.height += font_size + margin;
         }
 
         EndDrawing();
        
-        if (!socket_closed) { 
-            // @TODO: recv in non-blocking mode to still have the application responsive
+        if (conn == CONNECTION_ESTABLISHED) { 
             SocketOpResult r = recvDoubleArray(sockfd, &tr.items, &tr.count);
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");
-                socket_closed = true;
+                conn = NO_CONNECTION; 
             }
    
             printf("extending histogram with %zu elements\n", tr.count); 
