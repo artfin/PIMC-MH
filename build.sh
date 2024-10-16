@@ -6,7 +6,7 @@ CC=gcc
 MPICC=mpicc
 CFLAGS="-Wall -Wextra -O2 -ggdb"
 
-INC="-I./raylib/include -I./raygui/ -isystem./raygui-4.0/src"
+INC="-I./raylib/include -I./raygui/ -isystem./raygui/src"
 
 #INC="-I./raylib/include"
 CLIENT_LIBS="-lstdc++ -lm"
@@ -17,7 +17,7 @@ DEPS="mtwist.o"
 
 #$CC $CFLAGS ./tools/dummy_server.c -o ./tools/dummy_server.exe 
 $CC $CFLAGS $INC server.c $DEPS -o ./server.exe $SERVER_LIBS
-#$MPICC -DNO_VISUALIZE $CFLAGS $INC 1d_sho.c $DEPS -o 1d_sho.exe $CLIENT_LIBS 
+$MPICC -DNO_VISUALIZE $CFLAGS $INC 1d_sho.c $DEPS -o 1d_sho.exe $CLIENT_LIBS 
 
 $CC $CFLAGS $INC m0_hear.c $DEPS -o m0_hear.exe $CLIENT_LIBS
 #$CC $CFLAGS $INC 3d_sho.c $DEPS -o 3d_sho.exe $LIBS 
