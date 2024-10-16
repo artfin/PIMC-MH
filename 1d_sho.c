@@ -340,19 +340,25 @@ defer:
 
 }
 
-void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool collect_positions)
+void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, int blockSize, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
     size_t equilSkip = 20000;
     size_t observableSkip = 400;
 
-    size_t send_size = 100;
-    assert(send_size <= 100 && " NOTE: keep the send_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+    size_t send_size = 1000;
+    assert(send_size <= 1000 && " NOTE: keep the send_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+    // TODO: investigate further... for now, it works fine even when transfering 5000 floats over the local network 
 
     printf("Total MC steps: %zu\n", numSteps);
     printf("Equilibration skip: %zu\n", equilSkip);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
+    printf("Using blockSize = %d\n", blockSize);
+
+    double *block = arena_alloc(&arena, blockSize);
+    memset(block, 0, blockSize*sizeof(double));
+    size_t cursorBlock = 0;
 
     for (size_t step = 0; step < numSteps; ++step) 
     {
@@ -367,7 +373,19 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
         }
 
        if ((step % observableSkip == 0) && (step > equilSkip)) {
-            da_append(&trace.energies, Energy(path));
+            block[cursorBlock] = Energy(path);
+            cursorBlock++;
+
+            if ((int) cursorBlock == blockSize) {
+                double blockMean = 0.0;
+                for (int i = 0; i < blockSize; ++i) {
+                    blockMean += block[i];
+                }
+                blockMean = blockMean / blockSize; 
+
+                da_append(&trace.energies, blockMean);
+                cursorBlock = 0;
+            }
 
             if (collect_positions) {
                 assert(path.numParticles == 1);
@@ -573,7 +591,8 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     path.numTimeSlices = 64;
     path.beta = 10.0;
     path.tau = path.beta/path.numTimeSlices;
-    
+    int blockSize = 1;
+
     double en_exact = SHOExact(path.beta);
 
     printf("ctx.rank = %d, size = %d\n", ctx.rank, ctx.size);
@@ -588,6 +607,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendInt32(sockfd, (int) path.numTimeSlices);
             sendInt32(sockfd, ctx.size);
             sendFloat64(sockfd, en_exact);
+            recvInt32(sockfd, &blockSize);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
@@ -610,8 +630,8 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
         }
     }
     
-    size_t MC_steps = 100 * 1000 * 1000;
-    pimc_driver(ctx, path, MC_steps, sockfd, true);
+    size_t MC_steps = 10 * 1000 * 1000;
+    pimc_driver(ctx, path, MC_steps, sockfd, blockSize, false);
 
     int binSize = 500;
     Stats s = getStatsEx(trace.energies, binSize);
