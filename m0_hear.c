@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <float.h>
 
+#include <mpi.h>
+
 #include <gsl/gsl_histogram.h>
 #include <gsl/gsl_statistics.h>
 
@@ -321,7 +323,7 @@ defer:
 
 }
 
-void pimc_driver(Path path, size_t numSteps, int sockfd, bool collect_positions)
+void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool collect_positions)
 {
     AcceptanceRate acc = {0};
 
@@ -374,9 +376,22 @@ void pimc_driver(Path path, size_t numSteps, int sockfd, bool collect_positions)
                 }
 
                 if (trace.positions.count == send_size) {
-                    sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
-                    trace.positions.count = 0;
-                    printf("Sending M0 values...\n");
+                    if (ctx.rank > 0) {
+                        MPI_Send(trace.positions.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+                        trace.positions.count = 0;
+                    } else {
+                        printf("Sending packets...\n");
+                        sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
+                        trace.positions.count = 0;
+                        
+                        MPI_Status status = {0}; 
+                        for (int i = 1; i < ctx.size; ++i) {
+                            MPI_Recv(trace.positions.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                            trace.positions.count = send_size;
+                            sendFloat64Array(sockfd, trace.positions.items, trace.positions.count);
+                            trace.positions.count = 0;
+                        }
+                    } 
                 }
             }
        } 
@@ -550,8 +565,14 @@ Stats getStats(double *arr, size_t count)
     return s;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    MPI_Init(&argc, &argv);
+    
+    MPI_Context ctx = {0}; 
+    MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
+
     uint32_t seed = mt_goodseed();
     mt_seed32(seed);
         
@@ -576,23 +597,25 @@ int main()
 
     sample_beads(&path);
 
-    
-    int sockfd = initClient();
-    printf("connection established at socket = %d\n", sockfd);
-    
-    if (sockfd > 0) {
-        sendFloat64(sockfd, path.beta);
-        sendInt32(sockfd, (int) path.numTimeSlices);
-        sendInt32(sockfd, 1);
-        sendFloat64(sockfd, refVal);
-        recvInt32(sockfd, &blockSize);
-    } else {
-        fprintf(stderr, "ERROR: client could not connect to server\n");
-        fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
+    int sockfd = 0; 
+    if (ctx.rank == 0) { 
+        sockfd = initClient();
+        printf("connection established at socket = %d\n", sockfd);
+
+        if (sockfd > 0) {
+            sendFloat64(sockfd, path.beta);
+            sendInt32(sockfd, (int) path.numTimeSlices);
+            sendInt32(sockfd, ctx.size);
+            sendFloat64(sockfd, refVal);
+            recvInt32(sockfd, &blockSize);
+        } else {
+            fprintf(stderr, "ERROR: client could not connect to server\n");
+            fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
+        }
     }
    
     size_t MC_steps =  1 * 1000 * 1000 * 1000;
-    pimc_driver(path, MC_steps, sockfd, true);
+    pimc_driver(ctx, path, MC_steps, sockfd, true);
 
     double Lambda = /* Planck */ 2.0*M_PI / sqrt(2.0*M_PI * mu / beta); // a.u.^3
     printf("Lambda: %.5f\n", Lambda);
@@ -629,7 +652,9 @@ int main()
 
     gsl_histogram_free(p_histogram);
     */
-     
+
+    MPI_Finalize();
+
     return 0;
 }
 
