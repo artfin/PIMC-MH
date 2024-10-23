@@ -36,6 +36,7 @@ typedef enum {
     NO_CONNECTION,
     CONNECTION_ESTABLISHED, 
     CONNECTION_ERROR, // TODO: we may need to return from the 'accept' function to clean up the broken connection
+    DISCONNECTED,
 } ConnectionStatus;
 
 typedef enum {
@@ -53,6 +54,13 @@ typedef enum {
 // but this would mean that we should change the code for a server if a different client would want to add another field in the 'state' structure.
 // So named parameter approach seems to be better.. 
 
+#define assert_sockop_result(r)                                             \
+    do {                                                                    \
+        if (r != SOCKOP_SUCCESS) {                                          \
+            printf("%s:%d socket operation failed\n", __FILE__, __LINE__);  \
+            return_defer(1);                                                \
+        }                                                                   \
+    } while(0)                                                              \
 
 static bool _verbose = true;
 static char *_client_ip = NULL; // deallocation?
@@ -119,7 +127,9 @@ Message* deserialize_message(MessageKind kind, uint32_t payload_length, uint8_t 
 
 SocketOpResult w_send(int sockfd, const void *buf, size_t len) {
     ssize_t bytes_sent = send(sockfd, buf, len, 0);
-    if (bytes_sent != (ssize_t) len) {
+    if (bytes_sent == 0) {
+        return SOCKOP_DISCONNECTED;
+    } else if (bytes_sent != (ssize_t) len) {
         perror("send");
         return SOCKOP_ERROR;
     }
@@ -129,7 +139,9 @@ SocketOpResult w_send(int sockfd, const void *buf, size_t len) {
 
 SocketOpResult w_recv(int sockfd, void *buf, size_t len) {
     ssize_t bytes_recv = recv(sockfd, buf, len, 0);
-    if (bytes_recv == -1) {
+    if (bytes_recv == 0) {
+        return SOCKOP_DISCONNECTED;
+    } else if (bytes_recv == -1) {
         if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
             return SOCKOP_WAITING; 
         } else {
@@ -147,6 +159,11 @@ SocketOpResult w_recv(int sockfd, void *buf, size_t len) {
 SocketOpResult sendInt32(int sockfd, int32_t value)
 {
     Message *msg = deserialize_message(MSG_INT32, sizeof(int), (uint8_t*) &value);
+    
+    if (_verbose) {
+        printf("(sendInt32): message contents = [int] %d\n", value);
+    } 
+    
     return w_send(sockfd, msg, msg->size);
 }
 
@@ -229,7 +246,7 @@ SocketOpResult recvFloat64Array(int sockfd, double **data, size_t *count)
     *data = bytes + sizeof(uint32_t) + sizeof(MessageKind);
 
     if (_verbose) {
-        printf("(recvFloat64Array): message contents = [%zu float64s]: %.3lf ...\n", *count, (*data)[0]);
+        printf("(recvFloat64Array): message contents = [%u bytes, %zu float64s] %.3lf ...\n", sz, *count, (*data)[0]);
     }
 
     return SOCKOP_SUCCESS; 
@@ -388,17 +405,15 @@ ConnectionStatus acceptClientConnection(int *data_socket)
 
     char *msg = NULL;
     size_t msg_length = 0;
-    do {
-        SocketOpResult r = recvFixedLengthString(*data_socket, &msg, &msg_length);
-        switch (r) {
-            case SOCKOP_ERROR: exit(1);
-            case SOCKOP_DISCONNECTED: exit(1); 
-            case SOCKOP_SUCCESS: break;
-            case SOCKOP_WAITING: assert(false);
-        }
-    } while (msg && (strcmp(msg, HANDSHAKE_MSG) != 0));
-    printf("server: received hanshake\n");
 
+    // do {
+    // } while (strcmp(msg, HANDSHAKE_MSG) != 0);
+    
+    SocketOpResult r = recvFixedLengthString(*data_socket, &msg, &msg_length);
+    if (r != SOCKOP_SUCCESS) return CONNECTION_ERROR;
+    assert(strncmp(msg, HANDSHAKE_MSG, strlen(HANDSHAKE_MSG)) == 0);
+
+    printf("server: received hanshake\n");
     if (sendFixedLengthString(*data_socket, HANDSHAKE_MSG) < 0) return -1; 
 
     return CONNECTION_ESTABLISHED; 

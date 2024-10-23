@@ -38,7 +38,10 @@ double SHOExact(double beta) {
 }
 
 // TODO: Send a map (?) with a reference value with respect to which we display the difference
+
 // TODO: Customize the received values from client: we should receive an array of AVERAGES over N values, not raw data 
+//       - averageWindow is now read from window
+//       - then we have to send it over to client
 // TODO: load the default values for histogram ranges from the configuration file
 
 gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
@@ -66,19 +69,23 @@ gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
     return new_h;
 }
 
+
 int main()
 {
     initServer();
     set_verbose(true); 
 
+    int result = 0;
     int sockfd = 0;
     ConnectionStatus conn = NO_CONNECTION; 
-    bool parameters_received = false;
+    bool parameters_exchanged = false;
 
+    // TODO: pack these into a structure?
     double beta;
     int numTimeSlices;
     int nclients;
     double refval;
+    int blockSize = 1;
     
     Trace tr = {0};
 
@@ -87,6 +94,7 @@ int main()
 
     gsl_histogram_set_ranges_uniform(h, -0.5, 0.5);
     size_t samples_count = 0;
+    size_t packets_count = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
@@ -104,9 +112,10 @@ int main()
     GuiSetFont(font);
     font.baseSize = FONT_SIZE_LOAD;  
 
-    bool ylogscale = false;    
-    bool editValueBox[2] = { 0 };
-    char valTextBox[2][20] = { 0 };
+    bool ylogscale = false;  
+    // a pile of values... histogram range & average window size 
+    bool editValueBox[3] = { 0 };
+    char valTextBox[3][20] = { 0 };
 
     SetTargetFPS(60);
 
@@ -147,27 +156,32 @@ int main()
             }
         } 
 
-        if ((conn == CONNECTION_ESTABLISHED) && !parameters_received) {
+        if ((conn == CONNECTION_ESTABLISHED) && !parameters_exchanged) {
             SocketOpResult r;
 
             r = recvFloat64(sockfd, &beta);
-            assert(r == SOCKOP_SUCCESS);
+            assert_sockop_result(r); 
 
             r = recvInt32(sockfd, &numTimeSlices);
-            assert(r == SOCKOP_SUCCESS);
+            assert_sockop_result(r); 
             
             r = recvInt32(sockfd, &nclients);
-            assert(r == SOCKOP_SUCCESS);
+            assert_sockop_result(r); 
     
             r = recvFloat64(sockfd, &refval); 
-            assert(r == SOCKOP_SUCCESS);
+            assert_sockop_result(r); 
+                
+            sendInt32(sockfd, blockSize);
 
-            parameters_received = true;
-            // TODO: what if the parameters won't be recevied in the same tick?
-            // just 'assert' that they do.. otherwise we will need to develop some marking scheme 
-            // to store the information which parameters have been received and which are still to be awaited 
+            parameters_exchanged = true;
+  
+            // The parameters are exchanged in the BLOCKING mode of the socket
+            // and only then we set the socket in the non-blocking mode
+                      
+            int flags = fcntl(sockfd, F_GETFL, 0);
+            flags |= O_NONBLOCK;
+            fcntl(sockfd, F_SETFL, flags); 
         } 
-
         
         for (size_t i = 0; i < nbins; ++i) 
         {
@@ -244,8 +258,8 @@ int main()
         GuiCheckBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 1.5f*font_size, 1.5f*font_size }, "Y log scale", &ylogscale);
         contentRect.y += font_size + margin;
 
-        if (conn == NO_CONNECTION) {
-                
+        if (conn == NO_CONNECTION) 
+        {
             GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, font_size }, "Histogram ranges");
             contentRect.y += font_size + margin;
            
@@ -276,17 +290,34 @@ int main()
                     double value = strtod(valTextBox[1], &endPtr);
                     if (endPtr != valTextBox[1]) gsl_histogram_set_ranges_uniform(h, xmin, value);
                 }
-
             }
 
-        } else if ((conn == CONNECTION_ESTABLISHED) && parameters_received) {
-            contentRect.height += font_size + 2*margin;
-            GuiLabel(contentRect, TextFormat("Connection established with %s", get_client_ip()));
-            contentRect.height += font_size + 2*margin;
+            // contentRect.y += font_size + margin;
+            // GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, font_size }, "Block size (on client)");
+            // contentRect.y += font_size + margin;
+            // 
+            // if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[2], 20, editValueBox[2]))
+            // {
+            //     editValueBox[2] = !editValueBox[2];
 
-            GuiLabel(contentRect, TextFormat("client processes: %d", nclients));
-            contentRect.height += font_size + margin;
+            //     // Input ended
+            //     if (!editValueBox[2]) {
+            //         int value = atoi(valTextBox[2]);
+            //         if (value != 0) blockSize = value;  
+            //     }
+            // }
+
+        } else if (parameters_exchanged) {
+            contentRect.height += font_size + 2*margin;
             
+            if (conn == CONNECTION_ESTABLISHED) {
+                GuiLabel(contentRect, TextFormat("Connection established with %s", get_client_ip()));
+                contentRect.height += font_size + 2*margin;
+
+                GuiLabel(contentRect, TextFormat("client processes: %d", nclients));
+                contentRect.height += font_size + margin;
+            }
+
             GuiLabel(contentRect, TextFormat("beta: %.2f", beta));
             contentRect.height += font_size + margin;
             
@@ -296,25 +327,28 @@ int main()
             GuiLabel(contentRect, TextFormat("Samples: %zu", samples_count));
             contentRect.height += font_size + margin;
             
+            GuiLabel(contentRect, TextFormat("Packets: %zu", packets_count));
+            contentRect.height += font_size + margin;
+            
             GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
             contentRect.height += font_size + margin;
             
-            GuiLabel(contentRect, TextFormat("Mean: %.5f", mean));
+            GuiLabel(contentRect, TextFormat("Mean: %.5e", mean));
             contentRect.height += font_size + margin;
             
             double exp_error = sigma/sqrt(samples_count);
-            GuiLabel(contentRect, TextFormat("Error estimate: %.5f", exp_error));
+            GuiLabel(contentRect, TextFormat("Error estimate: %.5e", exp_error));
             contentRect.height += font_size + margin;
             
-            GuiLabel(contentRect, TextFormat("Reference: %.5f", refval));
+            GuiLabel(contentRect, TextFormat("Reference: %.5e", refval));
             contentRect.height += font_size + margin;
             
             double actual_error = mean - refval; 
-            GuiLabel(contentRect, TextFormat("Actual error: %.5f", actual_error));
+            GuiLabel(contentRect, TextFormat("Actual error: %.5e", actual_error));
             contentRect.height += font_size + margin;
             
             double rel_error = fabs(actual_error) / refval;
-            GuiLabel(contentRect, TextFormat("Relative error: %.2f%%", rel_error*100.0));
+            GuiLabel(contentRect, TextFormat("Relative error: %.3f%%", rel_error*100.0));
             contentRect.height += font_size + margin;
         }
 
@@ -325,29 +359,33 @@ int main()
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");
-                conn = NO_CONNECTION; 
-            }
-   
-            // printf("extending histogram with %zu elements\n", tr.count); 
-            for (size_t i = 0; i < tr.count; ++i) {
-                while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
-                    h = gsl_histogram_extend(h);
-                    printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
-                } 
-                gsl_histogram_increment(h, tr.items[i]);
+                conn = DISCONNECTED; 
             }
 
-            samples_count += tr.count;
+            if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive 
+                printf("extending histogram with %zu elements\n", tr.count); 
+                for (size_t i = 0; i < tr.count; ++i) {
+                    while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
+                        h = gsl_histogram_extend(h);
+                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                    } 
+                    gsl_histogram_increment(h, tr.items[i]);
+                }
+
+                samples_count += tr.count * blockSize;
+                packets_count++;
+            }
         }
 
         // used as a buffer in recv
         arena_reset(&arena); 
     }
 
-    close(sockfd);
+defer:
+    if (sockfd) close(sockfd);
     arena_free(&arena);
     gsl_histogram_free(h);
 
-    return 0;
+    return result;
 }
 
