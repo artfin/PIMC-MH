@@ -2,11 +2,28 @@
 #include <math.h>
 #include <stdbool.h>
 #include <float.h>
+#include <time.h>
 
+#ifndef NO_MPI
 #include <mpi.h>
+#endif
 
 #include <gsl/gsl_histogram.h>
 #include <gsl/gsl_statistics.h>
+
+#define DA_INIT_CAP 256
+#define da_append(da, item)                                                          \
+    do {                                                                             \
+        if ((da)->count >= (da)->capacity) {                                         \
+            (da)->capacity = (da)->capacity == 0 ? DA_INIT_CAP : (da)->capacity*2;   \
+            (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
+            assert((da)->items != NULL && "Buy more RAM lol");                       \
+        }                                                                            \
+                                                                                     \
+        (da)->items[(da)->count++] = (item);                                         \
+    } while (0)
+
+#define return_defer(value) do { result = (value); goto defer; } while (0)
 
 #define ALU               5.29177210903e-11 // SI: m
 #define RAMTOAMU          1822.888485332
@@ -51,8 +68,6 @@ static Arena arena = {0};
 #define FONT_SIZE_LOAD 160 
 Font font = {0};
 
-#include "common.h"
-
 #define PROTOCOL_IMPLEMENTATION 
 #include "protocol.h"
 
@@ -63,16 +78,34 @@ Font font = {0};
                                          
 #define lam 1.0/(2.0*mu) // hbar^2/2m
 
-#define COORD_SAMPLE_MAX  4.0 // a.u -- we sample coordinates within this cube ???
+#define COORD_SAMPLE_MIN 4.0
+#define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
 #define RMAX_COLLECT 30.0 // a.u.
 #define COORD_MAX    50.0 // a.u.
 //#define TT 300.0 // K
 // ---------------------------------------------------------
 
+typedef struct {
+    int rank;
+    int size;
+} MPI_Context;
+
 #define XC(coords, i) coords[3*i + 0]
 #define YC(coords, i) coords[3*i + 1]
 #define ZC(coords, i) coords[3*i + 2]
+
+typedef struct {
+    double *beads;
+    size_t numTimeSlices;
+    double tau;
+    double beta;
+} Path;
+
+typedef struct {
+    size_t CenterOfMass;
+    size_t Staging;
+} AcceptanceRate;
 
 Path path = {0};
 
@@ -95,21 +128,59 @@ typedef struct {
 
 PIMC_Trace trace = {0};
 
+typedef struct {
+    void (*run)(MPI_Context ctx, int argc, char **argv);
+    const char *id;
+    const char *description;
+} MPI_Subcmd;
+
+void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv);
+void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv);
+void subcmd_run(MPI_Context ctx, int argc, char **argv);
+
+char* shift(int *argc, char ***argv);
+void usage(const char *program_path, MPI_Subcmd *subcmds, size_t subcmds_count);
+MPI_Subcmd *find_subcmd_by_id(MPI_Subcmd *subcmds, size_t subcmds_count, const char *id); 
+
+void load_resources();
+int msleep(long msec);
+
+
+#define DEFINE_SUBCMD(name, desc) \
+    {                             \
+        .run = subcmd_##name,     \
+        .id  = #name,             \
+        .description = desc       \
+    } 
+
+MPI_Subcmd subcmds[] = {
+    DEFINE_SUBCMD(visualize_necklace, "Visualize the changes single necklace upon COM & Staging actions"),
+    DEFINE_SUBCMD(visualize_ensemble, "Visualize an ensemble of necklaces"), 
+    DEFINE_SUBCMD(run, "Run the PIMC calculation of the harmonic oscillator"),
+};
+#define SUBCMDS_COUNT (sizeof(subcmds)/sizeof(subcmds[0]))
+
 void alloc_beads(Path *path)
 {
-    path->beads = (double**) malloc(path->numTimeSlices * sizeof(double*));
-    for (size_t i = 0; i < path->numTimeSlices; ++i) {
-        path->beads[i] = (double*) malloc(path->numParticles * 3*sizeof(double));
-        memset(path->beads[i], 0.0, path->numParticles*3*sizeof(double));
+    path->beads = (double*) malloc(path->numTimeSlices * 3*sizeof(double));
+    assert(path->beads != NULL);
+
+    memset(path->beads, 0.0, path->numTimeSlices * 3*sizeof(double));
+}
+
+double sample_bead()
+{
+    while (true) {
+        double c = COORD_SAMPLE_MAX * 0.5*(-1.0 + 2.0*mt_drand());
+        if (fabs(c) > COORD_SAMPLE_MIN) return c; 
     }
+
 }
 
 void sample_beads(Path *path)
 {
-    for (size_t i = 0; i < path->numTimeSlices; ++i) {
-        for (size_t j = 0; j < 3*path->numParticles; ++j) {
-            path->beads[i][j] = COORD_SAMPLE_MAX * 0.5*(-1.0 + 2.0*mt_drand()); 
-        }
+    for (size_t i = 0; i < 3*path->numTimeSlices; ++i) {
+        path->beads[i] = sample_bead(); 
     }
 }
 
@@ -117,18 +188,15 @@ double PotentialAction(Path path, size_t tslice)
 {
     assert(tslice < path.numTimeSlices);
 
-    double pot = 0.0;
-    for (size_t ptcl = 0; ptcl < path.numParticles; ++ptcl) {
-        double r = XC(path.beads[tslice], ptcl)*XC(path.beads[tslice], ptcl) + 
-                   YC(path.beads[tslice], ptcl)*YC(path.beads[tslice], ptcl) + 
-                   ZC(path.beads[tslice], ptcl)*ZC(path.beads[tslice], ptcl); 
-        r = sqrt(r);
-        pot = pot + V_HeAr(r);
-    }
+    double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+               YC(path.beads, tslice)*YC(path.beads, tslice) + 
+               ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+    r = sqrt(r);
 
-    return path.tau * pot;
+    return path.tau * V_HeAr(r);
 }
 
+/*
 double PotentialEnergy(Path path) {
     double result = 0.0;
 
@@ -165,16 +233,16 @@ double KineticEnergy(Path path)
     // note the 3.0/2.0 factor in the constant part of the energy estimator
     return 3.0/2.0*path.numParticles/path.tau + tot/path.numTimeSlices;
 }
+*/
 
-int COM_Move(Path path, size_t ptcl)
+int COM_Move(Path path)
 {
-    assert(ptcl < path.numParticles);
     int result = 0;
 
-    double delta = 1.0e-2; 
-    double shiftx = delta*COORD_SAMPLE_MAX*(-1.0 + 2.0*mt_drand());
-    double shifty = delta*COORD_SAMPLE_MAX*(-1.0 + 2.0*mt_drand());
-    double shiftz = delta*COORD_SAMPLE_MAX*(-1.0 + 2.0*mt_drand());
+    double delta = 1.0; 
+    double shiftx = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
+    double shifty = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
+    double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
 
     double oldAction = 0.0;
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
@@ -182,39 +250,20 @@ int COM_Move(Path path, size_t ptcl)
     } 
     
     double *oldbeadsx = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    double *oldbeadsy = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    double *oldbeadsz = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
     memset(oldbeadsx, 0.0, path.numTimeSlices * sizeof(double));
+    double *oldbeadsy = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
     memset(oldbeadsy, 0.0, path.numTimeSlices * sizeof(double));
+    double *oldbeadsz = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
     memset(oldbeadsz, 0.0, path.numTimeSlices * sizeof(double));
 
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        oldbeadsx[tslice] = XC(path.beads[tslice], ptcl);
-        oldbeadsy[tslice] = YC(path.beads[tslice], ptcl);
-        oldbeadsz[tslice] = ZC(path.beads[tslice], ptcl);
-        XC(path.beads[tslice], ptcl) = XC(path.beads[tslice], ptcl) + shiftx;
-        YC(path.beads[tslice], ptcl) = YC(path.beads[tslice], ptcl) + shifty;
-        ZC(path.beads[tslice], ptcl) = ZC(path.beads[tslice], ptcl) + shiftz;
+        oldbeadsx[tslice] = XC(path.beads, tslice);
+        oldbeadsy[tslice] = YC(path.beads, tslice);
+        oldbeadsz[tslice] = ZC(path.beads, tslice);
+        XC(path.beads, tslice) = XC(path.beads, tslice) + shiftx;
+        YC(path.beads, tslice) = YC(path.beads, tslice) + shifty;
+        ZC(path.beads, tslice) = ZC(path.beads, tslice) + shiftz;
     }
-    
-    // reject move that moves COM in such that any particles goes outside of the cube
-    bool within_cube = true;
-
-    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        if (abs(XC(path.beads[tslice], ptcl) > COORD_MAX) ||
-            abs(YC(path.beads[tslice], ptcl) > COORD_MAX) ||
-            abs(ZC(path.beads[tslice], ptcl) > COORD_MAX)) 
-        {
-            within_cube = false;
-            break;
-        }
-    }
-
-    if (!within_cube) {
-        printf("resampling the chain\n");
-        sample_beads(&path);
-        return_defer(0);
-    } 
 
     double newAction = 0.0;
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
@@ -226,12 +275,28 @@ int COM_Move(Path path, size_t ptcl)
     double alpha = exp(-(newAction - oldAction));
 
     if (u < alpha) {
+        /*
+        // reject move that moves COM in such that any particles goes outside of the cube
+        bool within_cube = true;
+
+        for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+            if (abs(XC(path.beads, tslice) > COORD_MAX) || abs(YC(path.beads, tslice) > COORD_MAX) || abs(ZC(path.beads, tslice) > COORD_MAX)) {
+                within_cube = false;
+                break;
+            }
+        }
+
+        if (!within_cube) {
+            printf("resampling the chain\n");
+            sample_beads(&path);
+        }
+        */
         return_defer(1);
     } else {
         for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-            XC(path.beads[tslice], ptcl) = oldbeadsx[tslice];
-            YC(path.beads[tslice], ptcl) = oldbeadsy[tslice];
-            ZC(path.beads[tslice], ptcl) = oldbeadsz[tslice];
+            XC(path.beads, tslice) = oldbeadsx[tslice];
+            YC(path.beads, tslice) = oldbeadsy[tslice];
+            ZC(path.beads, tslice) = oldbeadsz[tslice];
         }
 
         return_defer(0);
@@ -242,7 +307,7 @@ defer:
     return result;
 }
 
-int Staging_Move(Path path, size_t ptcl)
+int Staging_Move(Path path)
 // http://link.aps.org/doi/10.1103/PhysRevB.31.4234
 {
     // NOTE: how should we set the stage length?  
@@ -265,9 +330,9 @@ int Staging_Move(Path path, size_t ptcl)
 
     for (size_t i = 1; i < stage_len; ++i) {
         size_t tslice = (alpha_start + i) % path.numTimeSlices;
-        oldbeadsx[i - 1] = XC(path.beads[tslice], ptcl);
-        oldbeadsy[i - 1] = YC(path.beads[tslice], ptcl);
-        oldbeadsz[i - 1] = ZC(path.beads[tslice], ptcl);
+        oldbeadsx[i - 1] = XC(path.beads, tslice);
+        oldbeadsy[i - 1] = YC(path.beads, tslice);
+        oldbeadsz[i - 1] = ZC(path.beads, tslice);
         oldAction = oldAction + PotentialAction(path, tslice);
     }
 
@@ -278,22 +343,22 @@ int Staging_Move(Path path, size_t ptcl)
 
         double tau1 = (stage_len - i) * path.tau;
 
-        double avx = (tau1*XC(path.beads[tslicem1], ptcl) + path.tau*XC(path.beads[alpha_end], ptcl))/(path.tau+tau1);
-        double avy = (tau1*YC(path.beads[tslicem1], ptcl) + path.tau*YC(path.beads[alpha_end], ptcl))/(path.tau+tau1);
-        double avz = (tau1*ZC(path.beads[tslicem1], ptcl) + path.tau*ZC(path.beads[alpha_end], ptcl))/(path.tau+tau1);
+        double avx = (tau1*XC(path.beads, tslicem1) + path.tau*XC(path.beads, alpha_end))/(path.tau+tau1);
+        double avy = (tau1*YC(path.beads, tslicem1) + path.tau*YC(path.beads, alpha_end))/(path.tau+tau1);
+        double avz = (tau1*ZC(path.beads, tslicem1) + path.tau*ZC(path.beads, alpha_end))/(path.tau+tau1);
 
         double sigma2 = 2.0*lam / (1.0/path.tau + 1.0/tau1);
 
         double attx = avx + sqrt(sigma2)*generate_normal(1.0); 
         double atty = avy + sqrt(sigma2)*generate_normal(1.0);
         double attz = avz + sqrt(sigma2)*generate_normal(1.0);
+        // printf("attx: %.3lf\n", attx);
 
         bool allow = (fabs(attx) < COORD_MAX) && (fabs(atty) < COORD_MAX) && (fabs(attz) < COORD_MAX); 
-
         if (allow) {
-            XC(path.beads[tslice], ptcl) = attx;
-            YC(path.beads[tslice], ptcl) = atty;
-            ZC(path.beads[tslice], ptcl) = attz; 
+            XC(path.beads, tslice) = attx;
+            YC(path.beads, tslice) = atty;
+            ZC(path.beads, tslice) = attz; 
         
             newAction = newAction + PotentialAction(path, tslice); 
         }
@@ -307,9 +372,9 @@ int Staging_Move(Path path, size_t ptcl)
     } else {
         for (size_t i = 1; i < stage_len; ++i) {
             size_t tslice = (alpha_start + i) % path.numTimeSlices;
-            XC(path.beads[tslice], ptcl) = oldbeadsx[i - 1];
-            YC(path.beads[tslice], ptcl) = oldbeadsy[i - 1];
-            ZC(path.beads[tslice], ptcl) = oldbeadsz[i - 1];
+            XC(path.beads, tslice) = oldbeadsx[i - 1];
+            YC(path.beads, tslice) = oldbeadsy[i - 1];
+            ZC(path.beads, tslice) = oldbeadsz[i - 1];
         }
 
         return_defer(0);
@@ -325,6 +390,8 @@ defer:
 
 void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool collect_positions)
 {
+    (void) ctx;
+
     AcceptanceRate acc = {0};
 
     size_t equilSkip = 20000;
@@ -338,27 +405,18 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
 
     for (size_t step = 0; step < numSteps; ++step) 
     {
-        for (size_t i = 0; i < path.numParticles; ++i) {
-            size_t ptcl = mt_lrand() % path.numParticles;
-            acc.CenterOfMass += COM_Move(path, ptcl);
-        }
-
-        for (size_t i = 0; i < path.numParticles; ++i) {
-            size_t ptcl = mt_lrand() % path.numParticles;
-            acc.Staging += Staging_Move(path, ptcl);
-        }
+        acc.CenterOfMass += COM_Move(path);
+        acc.Staging += Staging_Move(path);
 
        if ((step % observableSkip == 0) && (step > equilSkip)) {
             if (collect_positions) {
-                assert(path.numParticles == 1);
-
                 double m0_est = 0.0;
                 size_t c = 0;
 
                 for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-                    double r = XC(path.beads[tslice], 0)*XC(path.beads[tslice], 0) + 
-                               YC(path.beads[tslice], 0)*YC(path.beads[tslice], 0) + 
-                               ZC(path.beads[tslice], 0)*ZC(path.beads[tslice], 0); 
+                    double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                               YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                               ZC(path.beads, tslice)*ZC(path.beads, tslice); 
                     r = sqrt(r);
                     
                     if ((r > RMIN_COLLECT) && (r < RMAX_COLLECT)) {
@@ -376,14 +434,18 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                 }
 
                 if (trace.positions.count == send_size) {
+#ifndef NO_MPI
                     if (ctx.rank > 0) {
                         MPI_Send(trace.positions.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
                         trace.positions.count = 0;
-                    } else {
+                    } else 
+#endif // NO_MPI
+                    {
                         printf("Sending packets...\n");
                         sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
                         trace.positions.count = 0;
                         
+#ifndef NO_MPI
                         MPI_Status status = {0}; 
                         for (int i = 1; i < ctx.size; ++i) {
                             MPI_Recv(trace.positions.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
@@ -391,6 +453,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
                             sendFloat64Array(sockfd, trace.positions.items, trace.positions.count);
                             trace.positions.count = 0;
                         }
+#endif // NO_MPI
                     } 
                 }
             }
@@ -399,8 +462,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
 
     printf("--------------------------------------\n");
     printf("Acceptance Ratios:\n");
-    printf("Center of Mass : %.3lf\n", (double) acc.CenterOfMass/numSteps/path.numParticles);
-    printf("Staging        : %.3lf\n", (double) acc.Staging/numSteps/path.numParticles);
+    printf("Center of Mass : %.3lf\n", (double) acc.CenterOfMass/numSteps);
+    printf("Staging        : %.3lf\n", (double) acc.Staging/numSteps);
     printf("--------------------------------------\n");
 }
 
@@ -533,54 +596,17 @@ typedef struct {
     double mean;
     double std; 
 } Stats;  
+Stats getStats(double *arr, size_t count); 
 
-Stats getStats(double *arr, size_t count) 
+void subcmd_run(MPI_Context ctx, int argc, char **argv)
 {
-    Stats s = {0};
-    
-    s.max = FLT_MIN;
-    for (size_t i = 0; i < count; ++i) {
-        if (arr[i] > s.max) s.max = arr[i];
-    }
+    (void) argc;
+    (void) argv;
 
-    s.min = FLT_MAX;
-    for (size_t i = 0; i < count; ++i) {
-        if (arr[i] < s.min) s.min = arr[i];
-    }
-    
-    for (size_t i = 0; i < count; ++i) {
-        s.mean = s.mean + arr[i];
-    }
-
-    s.mean /= count;
-
-    double r = 0;
-    for (size_t i = 0; i < count; ++i) {
-        r = r + (arr[i] - s.mean) * (arr[i] - s.mean); 
-    }
-
-    r = r / (count - 1);
-    s.std = sqrt(r);
-
-    return s;
-}
-
-int main(int argc, char *argv[])
-{
-    MPI_Init(&argc, &argv);
-    
-    MPI_Context ctx = {0}; 
-    MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
-
-    uint32_t seed = mt_goodseed();
-    mt_seed32(seed);
-        
     double T = 300.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
-    path.numParticles = 1;
-    path.numTimeSlices = 1;
+    path.numTimeSlices = 4;
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
@@ -590,7 +616,6 @@ int main(int argc, char *argv[])
     int blockSize = 1; // TODO: ignore for now
 
     printf("Simulation parameters:\n");
-    printf("Number of Particles   = %zu\n", path.numParticles);
     printf("Number of Time Slices = %zu\n", path.numTimeSlices);
     printf("beta                  = %.3lf\n", beta);
     printf("tau                   = %.3lf\n", path.tau);
@@ -633,7 +658,286 @@ int main(int argc, char *argv[])
     printf("Minimum: %.10lf\n", m0.min);
     printf("Maximum: %.10lf\n", m0.max);
     printf("Mean: %.3e\n", m0.mean); 
+}
 
+void update_necklace_frame()
+{
+    static int simulation_step = 0; 
+
+    if (IsKeyPressed(KEY_SPACE)) {
+        printf("Simulation step: %d\n", simulation_step);
+
+        if (simulation_step % 2 == 0) {
+            COM_Move(path);
+        } else {
+            Staging_Move(path);
+        }
+
+        simulation_step++;
+    }
+
+    BeginDrawing();
+
+    ClearBackground(COLOR_BACKGROUND);
+   
+    int screen_width = GetScreenWidth();
+    int screen_height = GetScreenHeight();
+
+    int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
+
+    Rectangle world = {
+        .x = 0.1*screen_width, 
+        .y = 0.1*screen_height, 
+        .width = simul_sz, 
+        .height = simul_sz
+    };
+
+    DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
+    double GRID_MIN = -40.0;
+    double GRID_MAX =  40.0;   
+
+    double tau = world.height / (path.numTimeSlices - 1);
+
+    double prevx, prevy;
+
+    Color c = GetColor(0xF2AF29FF);
+
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        double bead = ZC(path.beads, tslice);
+
+        if ((bead < GRID_MIN) || (bead > GRID_MAX)) {
+            printf("%.5lf\n", bead);
+        }
+
+        double screenx = world.x + (bead - GRID_MIN) / (GRID_MAX - GRID_MIN) * simul_sz;
+        double screeny = world.y + tau * tslice; 
+        DrawCircle(screenx, screeny, 6.0, c);
+
+        if (tslice > 0) {
+            DrawLine(screenx, screeny, prevx, prevy, c);
+        }
+
+        prevx = screenx;
+        prevy = screeny;
+    }
+
+    EndDrawing(); 
+}
+
+void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
+{
+    (void) ctx;
+    (void) argc;
+    (void) argv;
+
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    
+    size_t factor = 80;
+    InitWindow(16*factor, 9*factor, "M0-HeAr visualize");
+    SetExitKey(KEY_Q);
+
+    double T = 300.0; // K
+    double beta = 1.0/(Boltzmann_Hartree * T); 
+
+    path.numTimeSlices = 8;
+    path.tau = beta/path.numTimeSlices;
+    path.beta = beta;
+    
+    alloc_beads(&path);
+    sample_beads(&path);
+    
+    SetTargetFPS(60);
+    while (!WindowShouldClose()) {
+        update_necklace_frame();
+    }
+
+    CloseWindow();
+}
+    
+#define ENSEMBLE_SIZE 100 
+Path ensemble[ENSEMBLE_SIZE] = {0};
+
+void update_ensemble_frame()
+{
+#define CIRCLE_SIZE 3.0
+
+    static int simulation_step = 0; 
+    printf("Simulation step: %d\n", simulation_step);
+
+    for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
+        COM_Move(ensemble[i]);
+        Staging_Move(ensemble[i]);
+    
+        bool within = true;
+        for (size_t tslice = 0; tslice < ensemble[i].numTimeSlices; ++tslice) {
+            if ((XC(ensemble[i].beads, tslice) > COORD_MAX) || (XC(ensemble[i].beads, tslice) < -COORD_MAX) || 
+                (YC(ensemble[i].beads, tslice) > COORD_MAX) || (YC(ensemble[i].beads, tslice) < -COORD_MAX) || 
+                (ZC(ensemble[i].beads, tslice) > COORD_MAX) || (ZC(ensemble[i].beads, tslice) < -COORD_MAX)) 
+            {
+                within = false;
+                break;
+            } 
+        }
+
+        if (!within) {
+            printf("Resampling necklace %zu/%d\n", i, ENSEMBLE_SIZE);
+            sample_beads(&ensemble[i]);
+        }
+ 
+    }
+    
+    simulation_step++;
+
+    BeginDrawing();
+
+    ClearBackground(COLOR_BACKGROUND);
+   
+    int screen_width = GetScreenWidth();
+    int screen_height = GetScreenHeight();
+
+    int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
+
+    Rectangle world = {
+        .x = 0.1*screen_width, 
+        .y = 0.1*screen_height, 
+        .width = simul_sz, 
+        .height = simul_sz
+    };
+
+    DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
+   
+    DrawCircleLines(world.x+world.width/2, world.y+world.height/2, simul_sz/(2.0*COORD_MAX)*RMAX_COLLECT, LIGHTGRAY);
+
+    Color color = GetColor(0xF2AF29FF);
+    Color color_out = GetColor(0xA83E32FF);
+
+    double GRID_MIN = -COORD_MAX;
+    double GRID_MAX =  COORD_MAX;
+
+    int inside = 0, outside = 0;
+
+    for (size_t i = 0; i < ENSEMBLE_SIZE; ++i)
+    { 
+        double comx = 0.0, comy = 0.0;
+        for (size_t tslice = 0; tslice < ensemble[i].numTimeSlices; ++tslice) {
+            comx += XC(ensemble[i].beads, tslice);
+            comy += YC(ensemble[i].beads, tslice);
+        }
+        comx /= ensemble[i].numTimeSlices;
+        comy /= ensemble[i].numTimeSlices;
+
+        double screenx = world.x + (comx - GRID_MIN) / (GRID_MAX - GRID_MIN) * simul_sz;
+        double screeny = world.y + (comy - GRID_MIN) / (GRID_MAX - GRID_MIN) * simul_sz;
+
+        if ((comx < GRID_MIN) || (comx > GRID_MAX) || (comy < GRID_MIN) || (comy > GRID_MAX)) {
+            DrawCircle(screenx, screeny, CIRCLE_SIZE, color_out);
+            outside++;
+
+            for (size_t tslice = 0; tslice < ensemble[i].numTimeSlices; ++tslice) {
+                printf("necklace[%zu] = %.5f\n", tslice, ensemble[i].beads[tslice]);
+            }
+
+            msleep(1000);
+
+        } else { 
+            DrawCircle(screenx, screeny, CIRCLE_SIZE, color);
+            inside++;
+        }
+    }
+        
+    int font_size = 24;
+    {
+        const char *buffer = TextFormat("Necklaces inside: %d", inside);
+        Vector2 text_pos = { .x = world.x + world.width + 50, .y = world.y };
+        DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+    }
+    {
+        const char *buffer = TextFormat("Necklaces outside: %d", outside);
+        Vector2 text_pos = { .x = world.x + world.width + 50, .y = world.y + font_size };
+        DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+    }
+
+    EndDrawing();
+
+    msleep(200);
+}
+
+void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv)
+{
+    (void) ctx;
+    (void) argc;
+    (void) argv;
+    
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    
+    size_t factor = 80;
+    InitWindow(16*factor, 9*factor, "M0-HeAr visualize");
+    SetExitKey(KEY_Q);
+
+    load_resources();
+
+    double T = 300.0; // K
+    double beta = 1.0/(Boltzmann_Hartree * T); 
+
+    for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
+        ensemble[i].numTimeSlices = 2;
+        ensemble[i].tau = beta/ensemble[i].numTimeSlices;
+        ensemble[i].beta = beta;
+        
+        alloc_beads(&ensemble[i]);
+        sample_beads(&ensemble[i]);
+    }
+    
+    SetTargetFPS(60);
+    while (!WindowShouldClose()) {
+        update_ensemble_frame();
+    }
+
+    CloseWindow();
+}
+
+
+int main(int argc, char *argv[])
+{
+    MPI_Context ctx = {0};
+#ifndef NO_MPI 
+    MPI_Init(&argc, &argv);
+
+    MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
+#else 
+    ctx.size = 1;
+    ctx.rank = 0;
+#endif // NO_MPI 
+   
+
+    uint32_t seed = mt_goodseed();
+    mt_seed32(seed);
+    
+    char *program_path = shift(&argc, &argv);
+
+    if (argc <= 0) {
+        usage(program_path, subcmds, SUBCMDS_COUNT);
+        fprintf(stderr, "ERROR: no subcommand is provided\n");
+        exit(1);
+    }
+
+    const char *subcmd_id = shift(&argc, &argv);
+    MPI_Subcmd *subcmd = find_subcmd_by_id(subcmds, SUBCMDS_COUNT, subcmd_id);
+
+    if (subcmd != NULL) {
+        subcmd->run(ctx, argc, argv);
+    } else {
+        usage(program_path, subcmds, SUBCMDS_COUNT);
+        fprintf(stderr, "ERROR: unknown subcommand  `%s`\n", subcmd_id);
+        exit(1);
+    }
+
+#ifndef NO_MPI 
+    MPI_Finalize();
+#endif // NO_MPI
     /*
     gsl_histogram *p_histogram;
 
@@ -653,10 +957,107 @@ int main(int argc, char *argv[])
     gsl_histogram_free(p_histogram);
     */
 
-    MPI_Finalize();
 
     return 0;
 }
 
+Stats getStats(double *arr, size_t count) 
+{
+    Stats s = {0};
+    
+    s.max = FLT_MIN;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] > s.max) s.max = arr[i];
+    }
+
+    s.min = FLT_MAX;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] < s.min) s.min = arr[i];
+    }
+    
+    for (size_t i = 0; i < count; ++i) {
+        s.mean = s.mean + arr[i];
+    }
+
+    s.mean /= count;
+
+    double r = 0;
+    for (size_t i = 0; i < count; ++i) {
+        r = r + (arr[i] - s.mean) * (arr[i] - s.mean); 
+    }
+
+    r = r / (count - 1);
+    s.std = sqrt(r);
+
+    return s;
+}
+
+char* shift(int *argc, char ***argv)
+{
+    assert(*argc > 0);
+    char *result = *argv[0];
+
+    *argc -= 1;
+    *argv += 1;
+
+    return result; 
+}
+
+void usage(const char *program_path, MPI_Subcmd *subcmds, size_t subcmds_count)
+{
+    fprintf(stderr, "Usage: %s [subcommand]\n", program_path);
+    fprintf(stderr, "Subcommands:\n");
+
+    int width = 0;
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        int len = strlen(subcmds[k].id);
+        if (width < len) width = len;
+    }
+
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        fprintf(stderr, "    %-*s - %s\n", width, subcmds[k].id, subcmds[k].description);
+    }
+}
+
+MPI_Subcmd *find_subcmd_by_id(MPI_Subcmd *subcmds, size_t subcmds_count, const char *id) 
+{
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        if (strcmp(subcmds[k].id, id) == 0) {
+            return &subcmds[k];
+        }
+    }
+
+    return NULL; 
+}
+
+void load_resources()
+{
+    int fileSize = 0;
+    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
+
+    font.baseSize = FONT_SIZE_LOAD;
+    font.glyphCount = 95;
+    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
+    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
+    font.texture = LoadTextureFromImage(atlas);
+
+    UnloadImage(atlas);
+    UnloadFileData(fileData);
+}
+
+int msleep(long msec)
+{
+    struct timespec ts = { 
+        .tv_sec = msec / 1000,
+        .tv_nsec = (msec % 1000) * 1000000,
+    };
+
+    int res;
+    do {
+        res = nanosleep(&ts, &ts);
+    } while (res && errno == EINTR);
+
+    return res;
+}
 // M0 (true) = 5.27e-6
 // T = 300 K -> M0 (est) = 5.47e-6, N = 150 mln
