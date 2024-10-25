@@ -107,7 +107,6 @@ typedef struct {
     size_t Staging;
 } AcceptanceRate;
 
-Path path = {0};
 
 typedef struct {
     double *items;
@@ -239,7 +238,7 @@ int COM_Move(Path path)
 {
     int result = 0;
 
-    double delta = 1.0; 
+    double delta = 0.1; 
     double shiftx = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shifty = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
@@ -275,22 +274,23 @@ int COM_Move(Path path)
     double alpha = exp(-(newAction - oldAction));
 
     if (u < alpha) {
-        /*
-        // reject move that moves COM in such that any particles goes outside of the cube
-        bool within_cube = true;
+        bool within = true;
 
         for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-            if (abs(XC(path.beads, tslice) > COORD_MAX) || abs(YC(path.beads, tslice) > COORD_MAX) || abs(ZC(path.beads, tslice) > COORD_MAX)) {
-                within_cube = false;
+            if ((XC(path.beads, tslice) > COORD_MAX) || (XC(path.beads, tslice) < -COORD_MAX) || 
+                (YC(path.beads, tslice) > COORD_MAX) || (YC(path.beads, tslice) < -COORD_MAX) || 
+                (ZC(path.beads, tslice) > COORD_MAX) || (ZC(path.beads, tslice) < -COORD_MAX)) 
+            {
+                within = false;
                 break;
-            }
+            } 
         }
 
-        if (!within_cube) {
-            printf("resampling the chain\n");
+        if (!within) {
+            // printf("Resampling necklace\n");
             sample_beads(&path);
         }
-        */
+
         return_defer(1);
     } else {
         for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
@@ -353,15 +353,11 @@ int Staging_Move(Path path)
         double atty = avy + sqrt(sigma2)*generate_normal(1.0);
         double attz = avz + sqrt(sigma2)*generate_normal(1.0);
         // printf("attx: %.3lf\n", attx);
-
-        bool allow = (fabs(attx) < COORD_MAX) && (fabs(atty) < COORD_MAX) && (fabs(attz) < COORD_MAX); 
-        if (allow) {
-            XC(path.beads, tslice) = attx;
-            YC(path.beads, tslice) = atty;
-            ZC(path.beads, tslice) = attz; 
         
-            newAction = newAction + PotentialAction(path, tslice); 
-        }
+        newAction = newAction + PotentialAction(path, tslice); 
+        XC(path.beads, tslice) = attx;
+        YC(path.beads, tslice) = atty;
+        ZC(path.beads, tslice) = attz; 
     }
 
     double u = mt_drand();
@@ -388,16 +384,14 @@ defer:
 
 }
 
-void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool collect_positions)
+void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 {
     (void) ctx;
 
     AcceptanceRate acc = {0};
 
-    size_t equilSkip = 20000;
-    size_t observableSkip = 400;
+    size_t observableSkip = 50;
     printf("Total MC steps: %zu\n", numSteps);
-    printf("Equilibration skip: %zu\n", equilSkip);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
 
     size_t send_size = 1000;
@@ -408,55 +402,41 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd, bool c
         acc.CenterOfMass += COM_Move(path);
         acc.Staging += Staging_Move(path);
 
-       if ((step % observableSkip == 0) && (step > equilSkip)) {
-            if (collect_positions) {
-                double m0_est = 0.0;
-                size_t c = 0;
-
-                for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-                    double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
-                               YC(path.beads, tslice)*YC(path.beads, tslice) + 
-                               ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-                    r = sqrt(r);
+       if (step % observableSkip == 0) 
+       {
+           for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+               double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                          YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                          ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+               r = sqrt(r);
                     
-                    if ((r > RMIN_COLLECT) && (r < RMAX_COLLECT)) {
-                        da_append(&trace.positions, r);
-
-                        double dipval = dip_HeAr(r);
-                        m0_est += dipval*dipval; 
-                        c = c + 1;
-                    }
-                }
+               if ((r > RMIN_COLLECT) && (r < RMAX_COLLECT)) {
+                   da_append(&trace.positions, r);
+               }
+           }
                 
-                if (c > 0) {
-                    m0_est = m0_est / c;
-                    da_append(&trace.m0s, m0_est);
-                }
 
-                if (trace.positions.count == send_size) {
+           if (trace.positions.count > send_size) {
 #ifndef NO_MPI
-                    if (ctx.rank > 0) {
-                        MPI_Send(trace.positions.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-                        trace.positions.count = 0;
-                    } else 
+               if (ctx.rank > 0) {
+                   MPI_Send(trace.positions.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+                   trace.positions.count = 0;
+               } else {
 #endif // NO_MPI
-                    {
-                        printf("Sending packets...\n");
-                        sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
-                        trace.positions.count = 0;
-                        
+               printf("Sending packets...\n");
+               sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
+               trace.positions.count = 0;
 #ifndef NO_MPI
-                        MPI_Status status = {0}; 
-                        for (int i = 1; i < ctx.size; ++i) {
-                            MPI_Recv(trace.positions.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                            trace.positions.count = send_size;
-                            sendFloat64Array(sockfd, trace.positions.items, trace.positions.count);
-                            trace.positions.count = 0;
-                        }
+               MPI_Status status = {0}; 
+               for (int i = 1; i < ctx.size; ++i) {
+                   MPI_Recv(trace.positions.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                   trace.positions.count = send_size;
+                   sendFloat64Array(sockfd, trace.positions.items, trace.positions.count);
+                   trace.positions.count = 0;
+               }
+               } 
 #endif // NO_MPI
-                    } 
-                }
-            }
+           }
        } 
     }
 
@@ -606,6 +586,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     double T = 300.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
+    Path path = {0};
     path.numTimeSlices = 4;
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
@@ -617,7 +598,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
 
     printf("Simulation parameters:\n");
     printf("Number of Time Slices = %zu\n", path.numTimeSlices);
-    printf("beta                  = %.3lf\n", beta);
+    printf("beta                  = %.3lf\n", path.beta);
     printf("tau                   = %.3lf\n", path.tau);
 
     sample_beads(&path);
@@ -640,7 +621,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     }
    
     size_t MC_steps =  1 * 1000 * 1000 * 1000;
-    pimc_driver(ctx, path, MC_steps, sockfd, true);
+    pimc_driver(ctx, path, MC_steps, sockfd);
 
     double Lambda = /* Planck */ 2.0*M_PI / sqrt(2.0*M_PI * mu / beta); // a.u.^3
     printf("Lambda: %.5f\n", Lambda);
@@ -660,7 +641,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     printf("Mean: %.3e\n", m0.mean); 
 }
 
-void update_necklace_frame()
+void update_necklace_frame(Path path)
 {
     static int simulation_step = 0; 
 
@@ -740,6 +721,7 @@ void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
     double T = 300.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
+    Path path = {0};
     path.numTimeSlices = 8;
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
@@ -749,7 +731,7 @@ void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
     
     SetTargetFPS(60);
     while (!WindowShouldClose()) {
-        update_necklace_frame();
+        update_necklace_frame(path);
     }
 
     CloseWindow();
@@ -763,28 +745,10 @@ void update_ensemble_frame()
 #define CIRCLE_SIZE 3.0
 
     static int simulation_step = 0; 
-    printf("Simulation step: %d\n", simulation_step);
 
     for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
         COM_Move(ensemble[i]);
         Staging_Move(ensemble[i]);
-    
-        bool within = true;
-        for (size_t tslice = 0; tslice < ensemble[i].numTimeSlices; ++tslice) {
-            if ((XC(ensemble[i].beads, tslice) > COORD_MAX) || (XC(ensemble[i].beads, tslice) < -COORD_MAX) || 
-                (YC(ensemble[i].beads, tslice) > COORD_MAX) || (YC(ensemble[i].beads, tslice) < -COORD_MAX) || 
-                (ZC(ensemble[i].beads, tslice) > COORD_MAX) || (ZC(ensemble[i].beads, tslice) < -COORD_MAX)) 
-            {
-                within = false;
-                break;
-            } 
-        }
-
-        if (!within) {
-            printf("Resampling necklace %zu/%d\n", i, ENSEMBLE_SIZE);
-            sample_beads(&ensemble[i]);
-        }
- 
     }
     
     simulation_step++;
@@ -847,15 +811,21 @@ void update_ensemble_frame()
     }
         
     int font_size = 24;
+    Vector2 text_pos = { .x = world.x + world.width + 50, .y = world.y };
+    {
+        const char *buffer = TextFormat("Simulation step: %d", simulation_step);
+        DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        text_pos.y += font_size;
+    }
     {
         const char *buffer = TextFormat("Necklaces inside: %d", inside);
-        Vector2 text_pos = { .x = world.x + world.width + 50, .y = world.y };
         DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        text_pos.y += font_size;
     }
     {
         const char *buffer = TextFormat("Necklaces outside: %d", outside);
-        Vector2 text_pos = { .x = world.x + world.width + 50, .y = world.y + font_size };
         DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
+        text_pos.y += font_size;
     }
 
     EndDrawing();
