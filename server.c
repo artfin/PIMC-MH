@@ -32,11 +32,6 @@ typedef struct {
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
 
-double SHOExact(double beta) {
-    //return 0.5/tanh(0.5/T);
-    return 0.5/tanh(0.5*beta);
-}
-
 // TODO: Send a map (?) with a reference value with respect to which we display the difference
 
 // TODO: Customize the received values from client: we should receive an array of AVERAGES over N values, not raw data 
@@ -44,31 +39,8 @@ double SHOExact(double beta) {
 //       - then we have to send it over to client
 // TODO: load the default values for histogram ranges from the configuration file
 
-gsl_histogram* gsl_histogram_extend(gsl_histogram* h)
-{
-    size_t nbins = h->n;
-    double add_bins = 1;
-    
-    double xmin = h->range[0];
-    double xmax = h->range[nbins];
-    double dx = h->range[1] - h->range[0];
-    
-    double new_xmin = xmin - add_bins*dx; 
-    double new_xmax = xmax + add_bins*dx; 
-    
-    gsl_histogram *new_h = gsl_histogram_alloc(nbins + 2*add_bins);
-    gsl_histogram_set_ranges_uniform(new_h, new_xmin, new_xmax);
-        
-    size_t nc = add_bins; // cursor over the new histogram
-    for (size_t i = 0; i < nbins; ++i) {
-        new_h->bin[nc++] = gsl_histogram_get(h, i); 
-    }
-
-    gsl_histogram_free(h);
-
-    return new_h;
-}
-
+gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h);
+gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h);
 
 int main()
 {
@@ -119,6 +91,10 @@ int main()
 
     SetTargetFPS(60);
 
+    double mean = 0.0;
+    double var = 0.0;
+    double stdev = 0.0;
+
     while (!WindowShouldClose()) {
         BeginDrawing();
         ClearBackground(COLOR_BACKGROUND);
@@ -126,9 +102,6 @@ int main()
         int screen_width = GetScreenWidth();
         int screen_height = GetScreenHeight();
     
-        double mean = gsl_histogram_mean(h);
-        double sigma = gsl_histogram_sigma(h);
-
         nbins = h->n;
         double xmin = h->range[0];
         double xmax = h->range[nbins];
@@ -207,21 +180,21 @@ int main()
         DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
 
         if (samples_count > 0) {
-            Vector2 mean_st = {
-                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
-                .y = world.y,
-            };
-            Vector2 mean_end = {
+            DrawLineEx(
+                CLITERAL(Vector2){
+                    .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
+                    .y = world.y,
+                },
+                CLITERAL(Vector2){
                 .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
                 .y = world.y + world.height,
-            };
-            DrawLineEx(mean_st, mean_end, 2.0, RED);
+                }, 2.0, RED);
 
             const char *buffer = TextFormat("%.3e", mean);
             Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
             Vector2 text_pos = {
                 world.x + (mean - xmin)/(xmax - xmin)*world.width - 0.25*text_len.x,
-                world.y + world.height + 0.25 * text_len.y,
+                world.y + world.height + 0.75 * text_len.y,
             };
             DrawTextEx(font, buffer, text_pos, font_size, 0, RED);
         }
@@ -336,7 +309,7 @@ int main()
             GuiLabel(contentRect, TextFormat("Mean: %.5e", mean));
             contentRect.height += font_size + margin;
             
-            double exp_error = sigma/sqrt(samples_count);
+            double exp_error = stdev/sqrt(samples_count);
             GuiLabel(contentRect, TextFormat("Error estimate: %.5e", exp_error));
             contentRect.height += font_size + margin;
             
@@ -362,17 +335,38 @@ int main()
                 conn = DISCONNECTED; 
             }
 
-            if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive 
+            if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive
                 printf("extending histogram with %zu elements\n", tr.count); 
-                for (size_t i = 0; i < tr.count; ++i) {
-                    while ((tr.items[i] < h->range[0] || (tr.items[i] > h->range[h->n]))) {
-                        h = gsl_histogram_extend(h);
-                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
-                    } 
-                    gsl_histogram_increment(h, tr.items[i]);
-                }
 
-                samples_count += tr.count * blockSize;
+                double packet_mean = 0.0;
+                for (size_t i = 0; i < tr.count; ++i) {
+                    while (tr.items[i] < h->range[0]) {
+                        h = gsl_histogram_extend_left(h);
+                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                    }
+
+                    while (tr.items[i] > h->range[h->n]) {
+                        h = gsl_histogram_extend_right(h);
+                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                    }
+
+                    gsl_histogram_increment(h, tr.items[i]);
+                    packet_mean += tr.items[i];
+                }
+                packet_mean /= tr.count;
+
+                double packet_var  = 0.0;
+                for (size_t i = 0; i < tr.count; ++i) {
+                    packet_var += (tr.items[i] - packet_mean)*(tr.items[i] - packet_mean);
+                }
+                packet_var /= (tr.count - 1);
+
+                assert(blockSize == 1); 
+                var = ((samples_count-1)*var + (tr.count-1)*packet_var) / (samples_count+tr.count-1) + samples_count*tr.count*(mean - packet_mean)*(mean - packet_mean)/(samples_count+tr.count)/(samples_count+tr.count - 1);
+                mean = (mean*samples_count + tr.count*packet_mean) / (samples_count + tr.count);
+                stdev = sqrt(var);
+
+                samples_count += tr.count;
                 packets_count++;
             }
         }
@@ -382,10 +376,62 @@ int main()
     }
 
 defer:
-    if (sockfd) close(sockfd);
+    if (sockfd) {
+        printf("Closing socket...\n");
+        close(sockfd);
+    }
+
     arena_free(&arena);
     gsl_histogram_free(h);
 
     return result;
+}
+
+gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h)
+{
+    size_t nbins = h->n;
+    double add_bins = 1;
+    
+    double xmin = h->range[0];
+    double xmax = h->range[nbins];
+    double dx = h->range[1] - h->range[0];
+    
+    double new_xmin = xmin - add_bins*dx; 
+    
+    gsl_histogram *new_h = gsl_histogram_alloc(nbins + add_bins);
+    gsl_histogram_set_ranges_uniform(new_h, new_xmin, xmax);
+        
+    size_t nc = add_bins; // cursor over the new histogram
+    for (size_t i = 0; i < nbins; ++i) {
+        new_h->bin[nc++] = gsl_histogram_get(h, i); 
+    }
+
+    gsl_histogram_free(h);
+
+    return new_h;
+}
+
+gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h)
+{
+    size_t nbins = h->n;
+    double add_bins = 1;
+    
+    double xmin = h->range[0];
+    double xmax = h->range[nbins];
+    double dx = h->range[1] - h->range[0];
+    
+    double new_xmax = xmax + add_bins*dx; 
+    
+    gsl_histogram *new_h = gsl_histogram_alloc(nbins + add_bins);
+    gsl_histogram_set_ranges_uniform(new_h, xmin, new_xmax);
+        
+    size_t nc = 0; // cursor over the new histogram
+    for (size_t i = 0; i < nbins; ++i) {
+        new_h->bin[nc++] = gsl_histogram_get(h, i); 
+    }
+
+    gsl_histogram_free(h);
+
+    return new_h;
 }
 
