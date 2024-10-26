@@ -238,7 +238,7 @@ int COM_Move(Path path)
 {
     int result = 0;
 
-    double delta = 0.1; 
+    double delta = 0.05; 
     double shiftx = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shifty = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
@@ -248,17 +248,13 @@ int COM_Move(Path path)
         oldAction = oldAction + PotentialAction(path, tslice);
     } 
     
-    double *oldbeadsx = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsx, 0.0, path.numTimeSlices * sizeof(double));
-    double *oldbeadsy = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsy, 0.0, path.numTimeSlices * sizeof(double));
-    double *oldbeadsz = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsz, 0.0, path.numTimeSlices * sizeof(double));
+    double *oldbeads = (double*) arena_alloc(&arena, path.numTimeSlices * 3*sizeof(double));
+    memset(oldbeads, 0.0, path.numTimeSlices * 3*sizeof(double));
 
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        oldbeadsx[tslice] = XC(path.beads, tslice);
-        oldbeadsy[tslice] = YC(path.beads, tslice);
-        oldbeadsz[tslice] = ZC(path.beads, tslice);
+        XC(oldbeads, tslice) = XC(path.beads, tslice);
+        YC(oldbeads, tslice) = YC(path.beads, tslice);
+        ZC(oldbeads, tslice) = ZC(path.beads, tslice);
         XC(path.beads, tslice) = XC(path.beads, tslice) + shiftx;
         YC(path.beads, tslice) = YC(path.beads, tslice) + shifty;
         ZC(path.beads, tslice) = ZC(path.beads, tslice) + shiftz;
@@ -294,9 +290,9 @@ int COM_Move(Path path)
         return_defer(1);
     } else {
         for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-            XC(path.beads, tslice) = oldbeadsx[tslice];
-            YC(path.beads, tslice) = oldbeadsy[tslice];
-            ZC(path.beads, tslice) = oldbeadsz[tslice];
+            XC(path.beads, tslice) = XC(oldbeads, tslice);
+            YC(path.beads, tslice) = YC(oldbeads, tslice);
+            ZC(path.beads, tslice) = ZC(oldbeads, tslice);
         }
 
         return_defer(0);
@@ -310,6 +306,41 @@ defer:
 int Staging_Move(Path path)
 // http://link.aps.org/doi/10.1103/PhysRevB.31.4234
 {
+    /*
+     * for the case numTimeSlices = 1 we probably skip this step AT ALL
+     *
+    if (path.numTimeSlices == 1) {
+        size_t tslice = 0;
+        
+        double oldAction = PotentialAction(path, tslice);
+        
+        double oldbeads[3];
+        XC(oldbeads, tslice) = XC(path.beads, tslice);
+        YC(oldbeads, tslice) = YC(path.beads, tslice);
+        ZC(oldbeads, tslice) = ZC(path.beads, tslice);
+        double sigma2 = 2.0*lam*path.tau;
+
+        XC(path.beads, tslice) = XC(path.beads, tslice) + sqrt(sigma2)*generate_normal(1.0); 
+        YC(path.beads, tslice) = YC(path.beads, tslice) + sqrt(sigma2)*generate_normal(1.0); 
+        ZC(path.beads, tslice) = ZC(path.beads, tslice) + sqrt(sigma2)*generate_normal(1.0); 
+        
+        double newAction = PotentialAction(path, tslice);
+        
+        double u = mt_drand();
+        double alpha = exp(-(newAction - oldAction));
+
+        if (u < alpha) {
+            return 1; 
+        } else {
+            XC(path.beads, tslice) = XC(oldbeads, tslice);
+            YC(path.beads, tslice) = YC(oldbeads, tslice);
+            ZC(path.beads, tslice) = ZC(oldbeads, tslice);
+
+            return 0; 
+        }
+    } 
+    */
+
     // NOTE: how should we set the stage length?  
     size_t stage_len = path.numTimeSlices/2; 
     assert(stage_len < path.numTimeSlices);
@@ -319,20 +350,15 @@ int Staging_Move(Path path)
     size_t alpha_start = mt_lrand() % path.numTimeSlices;
     size_t alpha_end = (alpha_start + stage_len) % path.numTimeSlices; 
 
-    double *oldbeadsx = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsx, 0.0, path.numTimeSlices * sizeof(double));
-    double *oldbeadsy = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsy, 0.0, path.numTimeSlices * sizeof(double));
-    double *oldbeadsz = (double*) arena_alloc(&arena, path.numTimeSlices * sizeof(double));
-    memset(oldbeadsz, 0.0, path.numTimeSlices * sizeof(double));
+    double *oldbeads = (double*) arena_alloc(&arena, path.numTimeSlices * 3*sizeof(double));
     
     double oldAction = 0.0;
-
     for (size_t i = 1; i < stage_len; ++i) {
         size_t tslice = (alpha_start + i) % path.numTimeSlices;
-        oldbeadsx[i - 1] = XC(path.beads, tslice);
-        oldbeadsy[i - 1] = YC(path.beads, tslice);
-        oldbeadsz[i - 1] = ZC(path.beads, tslice);
+
+        XC(oldbeads, i - 1) = XC(path.beads, tslice);
+        YC(oldbeads, i - 1) = YC(path.beads, tslice);
+        ZC(oldbeads, i - 1) = ZC(path.beads, tslice);
         oldAction = oldAction + PotentialAction(path, tslice);
     }
 
@@ -348,16 +374,12 @@ int Staging_Move(Path path)
         double avz = (tau1*ZC(path.beads, tslicem1) + path.tau*ZC(path.beads, alpha_end))/(path.tau+tau1);
 
         double sigma2 = 2.0*lam / (1.0/path.tau + 1.0/tau1);
-
-        double attx = avx + sqrt(sigma2)*generate_normal(1.0); 
-        double atty = avy + sqrt(sigma2)*generate_normal(1.0);
-        double attz = avz + sqrt(sigma2)*generate_normal(1.0);
-        // printf("attx: %.3lf\n", attx);
         
+        XC(path.beads, tslice) = avx + sqrt(sigma2)*generate_normal(1.0);
+        YC(path.beads, tslice) = avy + sqrt(sigma2)*generate_normal(1.0);
+        ZC(path.beads, tslice) = avz + sqrt(sigma2)*generate_normal(1.0); 
+
         newAction = newAction + PotentialAction(path, tslice); 
-        XC(path.beads, tslice) = attx;
-        YC(path.beads, tslice) = atty;
-        ZC(path.beads, tslice) = attz; 
     }
 
     double u = mt_drand();
@@ -368,9 +390,9 @@ int Staging_Move(Path path)
     } else {
         for (size_t i = 1; i < stage_len; ++i) {
             size_t tslice = (alpha_start + i) % path.numTimeSlices;
-            XC(path.beads, tslice) = oldbeadsx[i - 1];
-            YC(path.beads, tslice) = oldbeadsy[i - 1];
-            ZC(path.beads, tslice) = oldbeadsz[i - 1];
+            XC(path.beads, tslice) = XC(oldbeads, i - 1);
+            YC(path.beads, tslice) = YC(oldbeads, i - 1);
+            ZC(path.beads, tslice) = ZC(oldbeads, i - 1);
         }
 
         return_defer(0);
@@ -396,48 +418,69 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
     size_t send_size = 1000;
     assert(send_size <= 1000 && " NOTE: keep the send_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+    size_t packets_sent = 0;
 
-    for (size_t step = 0; step < numSteps; ++step) 
-    {
+    for (size_t step = 0; step < numSteps; ++step) {
         acc.CenterOfMass += COM_Move(path);
-        acc.Staging += Staging_Move(path);
 
-       if (step % observableSkip == 0) 
-       {
-           for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-               double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
-                          YC(path.beads, tslice)*YC(path.beads, tslice) + 
-                          ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-               r = sqrt(r);
-                    
-               if ((r > RMIN_COLLECT) && (r < RMAX_COLLECT)) {
-                   da_append(&trace.positions, r);
-               }
-           }
-                
+        if (path.numTimeSlices > 1) {
+            acc.Staging += Staging_Move(path);
+        }
 
-           if (trace.positions.count > send_size) {
+        if (step % observableSkip == 0) 
+        {
+            int m0_count = 0;
+            double m0_est = 0.0;
+
+            for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+                double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                           YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                           ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+                r = sqrt(r);
+
+                if ((r > RMIN_COLLECT) && (r < RMAX_COLLECT)) {
+                    // da_append(&trace.positions, r);
+
+                    double dipval = dip_HeAr(r);
+                    m0_est += dipval*dipval; 
+                    m0_count++; 
+                }
+            }
+
+            if (m0_count > 0) {
+                da_append(&trace.m0s, m0_est/m0_count);
+            }
+
+            double **send_items = &trace.m0s.items;
+            size_t *send_count = &trace.m0s.count;           
+
+
+            if (*send_count > send_size) {
 #ifndef NO_MPI
-               if (ctx.rank > 0) {
-                   MPI_Send(trace.positions.items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-                   trace.positions.count = 0;
-               } else {
+                if (ctx.rank > 0) {
+                    MPI_Send(*send_items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+                    *send_count = 0;
+                } else {
 #endif // NO_MPI
-               printf("Sending packets...\n");
-               sendFloat64Array(sockfd, trace.positions.items, trace.positions.count); 
-               trace.positions.count = 0;
+                    sendFloat64Array(sockfd, *send_items, *send_count); packets_sent++;
+                    *send_count = 0;
 #ifndef NO_MPI
-               MPI_Status status = {0}; 
-               for (int i = 1; i < ctx.size; ++i) {
-                   MPI_Recv(trace.positions.items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                   trace.positions.count = send_size;
-                   sendFloat64Array(sockfd, trace.positions.items, trace.positions.count);
-                   trace.positions.count = 0;
-               }
-               } 
+                    MPI_Status status = {0}; 
+                    for (int i = 1; i < ctx.size; ++i) {
+                        MPI_Recv(*send_items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                        *send_count = send_size;
+                        sendFloat64Array(sockfd, *send_items, *send_count); packets_sent++;
+                        *send_count = 0;
+                    }
+                   
+                    if (packets_sent % 100 == 0) { 
+                        printf("Sent %zu packets...\n", packets_sent);
+                    }
+                } 
 #endif // NO_MPI
-           }
-       } 
+            
+            }
+        } 
     }
 
     printf("--------------------------------------\n");
@@ -583,23 +626,33 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     (void) argc;
     (void) argv;
 
-    double T = 300.0; // K
+    double T = 100.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     Path path = {0};
-    path.numTimeSlices = 4;
+    path.numTimeSlices = 8;
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
+    
+    // double coeff = pow(4.0 * M_PI * lam * path.tau, -1.5);
 
     // Source: M0 at 295K from diploma
-    double refVal = 5.27e-05; 
+    // double refVal = 5.27e-05;
+
+    // double refVal = 22.491;   // mean(R) obtained with HEP: int(R*exp(-H/kT))/int(exp(-H/kT)) 
+    // double refVal = 17.525;   // mean(R) obtained with HEP: int(R*exp(-V/kT))/int(exp(-V/kT))
+    // double refVal = 2.14e-6;  // mean(mu^2) obtained with HEP: int(mu^2 exp(-V/kT))/int(exp(-V/kT)) 
+    double refVal = 1.655e-07;   // mean(mu^2) obtained with HEP: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
+    
     int blockSize = 1; // TODO: ignore for now
 
-    printf("Simulation parameters:\n");
-    printf("Number of Time Slices = %zu\n", path.numTimeSlices);
-    printf("beta                  = %.3lf\n", path.beta);
-    printf("tau                   = %.3lf\n", path.tau);
+    if (ctx.rank == 0) {
+        printf("Simulation parameters:\n");
+        printf("Number of Time Slices = %zu\n", path.numTimeSlices);
+        printf("beta                  = %.3lf\n", path.beta);
+        printf("tau                   = %.3lf\n", path.tau);
+    }
 
     sample_beads(&path);
 
