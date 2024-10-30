@@ -643,7 +643,9 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     // double refVal = 22.491;   // mean(R) obtained with HEP: int(R*exp(-H/kT))/int(exp(-H/kT)) 
     // double refVal = 17.525;   // mean(R) obtained with HEP: int(R*exp(-V/kT))/int(exp(-V/kT))
     // double refVal = 2.14e-6;  // mean(mu^2) obtained with HEP: int(mu^2 exp(-V/kT))/int(exp(-V/kT)) 
-    double refVal = 1.655e-07;   // mean(mu^2) obtained with HEP: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
+    // double refVal = 1.655e-07;   // mean(mu^2) obtained with HEP [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
+    double refVal = 2.18387e-07; // mean(mu^2) obtained with HEP [400K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
+ 
     
     int blockSize = 1; // TODO: ignore for now
 
