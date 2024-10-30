@@ -455,7 +455,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
             size_t *send_count = &trace.m0s.count;           
 
 
-            if (*send_count > send_size) {
+            if (*send_count >= send_size) {
 #ifndef NO_MPI
                 if (ctx.rank > 0) {
                     MPI_Send(*send_items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
@@ -626,11 +626,11 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     (void) argc;
     (void) argv;
 
-    double T = 100.0; // K
+    double T = 400.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     Path path = {0};
-    path.numTimeSlices = 8;
+    path.numTimeSlices = 32; 
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
@@ -775,7 +775,7 @@ void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     Path path = {0};
-    path.numTimeSlices = 8;
+    path.numTimeSlices = 32;
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     
@@ -905,7 +905,7 @@ void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv)
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
-        ensemble[i].numTimeSlices = 2;
+        ensemble[i].numTimeSlices = 32;
         ensemble[i].tau = beta/ensemble[i].numTimeSlices;
         ensemble[i].beta = beta;
         

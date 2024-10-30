@@ -28,6 +28,10 @@ typedef struct {
     size_t capacity;
 } Trace;
 
+#define Hartree           4.3597447222071e-18 // SI: J 
+#define Boltzmann         1.380649e-23 // SI: J * K^(-1)
+#define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
+
 
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
@@ -53,7 +57,7 @@ int main()
     bool parameters_exchanged = false;
 
     // TODO: pack these into a structure?
-    double beta;
+    double beta, T;
     int numTimeSlices;
     int nclients;
     double refval;
@@ -291,7 +295,8 @@ int main()
                 contentRect.height += font_size + margin;
             }
 
-            GuiLabel(contentRect, TextFormat("beta: %.2f", beta));
+            T = 1.0 / (beta * Boltzmann_Hartree);
+            GuiLabel(contentRect, TextFormat("T: %.2f", T));
             contentRect.height += font_size + margin;
             
             GuiLabel(contentRect, TextFormat("time slices: %d", numTimeSlices));
