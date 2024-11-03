@@ -194,10 +194,10 @@ double PotentialAction(Path path, size_t tslice)
 {
     assert(tslice < path.numTimeSlices);
 
-    double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
-               YC(path.beads, tslice)*YC(path.beads, tslice) + 
-               ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-    r = sqrt(r);
+    double r2 = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+    double r = sqrt(r2);
 
     return path.tau * V_HeAr(r);
 }
@@ -207,10 +207,10 @@ double Path_PotentialAction(Path path)
     double act = 0.0;
 
     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        double r = XC(path.beads, tslice)*XC(path.beads, tslice) + 
-                   YC(path.beads, tslice)*YC(path.beads, tslice) + 
-                   ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-        r = sqrt(r);
+        double r2 = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                    YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                    ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+        double r = sqrt(r2);
         act += V_HeAr(r);
     }
 
@@ -454,17 +454,16 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
         }
 
         if (step % observableSkip == 0) {
-            double rc = 0.0;
+            double com[3] = {0}; 
             for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-                double dx = XC(path.beads, tslice)*XC(path.beads, tslice); 
-                double dy = YC(path.beads, tslice)*YC(path.beads, tslice); 
-                double dz = ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-                rc += sqrt(dx*dx + dy*dy + dz*dz);
+                com[0] += XC(path.beads, tslice) / path.numTimeSlices; 
+                com[1] += YC(path.beads, tslice) / path.numTimeSlices; 
+                com[2] += ZC(path.beads, tslice) / path.numTimeSlices; 
             }
 
-            rc = rc / path.numTimeSlices;
+            double rcom = sqrt(com[0]*com[0] + com[1]*com[1] + com[2]*com[2]); 
 
-            if ((rc > RMIN_COLLECT) && (rc < RMAX_COLLECT)) {
+            if ((rcom > RMIN_COLLECT) && (rcom < RMAX_COLLECT)) {
                 double m0_est = 0.0;
                 
                 for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
@@ -477,7 +476,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                     m0_est += dipval*dipval/path.numTimeSlices; 
                 }
 
-                da_append(&trace.positions, rc);
+                da_append(&trace.positions, rcom);
                 // da_append(&trace.m0s, m0_est);
             }
 
@@ -764,8 +763,8 @@ void update_necklace_frame(Path path)
     };
 
     DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
-    double GRID_MIN = -40.0;
-    double GRID_MAX =  40.0;   
+    double GRID_MIN = -10.0;
+    double GRID_MAX =  10.0;   
 
     double tau = world.height / (path.numTimeSlices - 1);
 
@@ -817,8 +816,13 @@ void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
     path.beta = beta;
     
     alloc_beads(&path);
-    sample_beads(&path);
-    
+    // sample_beads(&path);
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        XC(path.beads, tslice) = 5.0 + mt_drand();
+        YC(path.beads, tslice) = 5.0 + mt_drand();
+        ZC(path.beads, tslice) = 5.0 + mt_drand();
+    }
+     
     SetTargetFPS(60);
     while (!WindowShouldClose()) {
         update_necklace_frame(path);
@@ -869,7 +873,7 @@ void update_ensemble_frame()
     Color color_out = GetColor(0xA83E32FF);
 
     double GRID_MIN = -COORD_MAX;
-    double GRID_MAX =  COORD_MAX;
+    double GRID_MAX = COORD_MAX;
 
     int inside = 0, outside = 0;
 
@@ -947,7 +951,7 @@ void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv)
 
     load_resources();
 
-    double T = 20.0; // K
+    double T = 300.0; // K
     double beta = 1.0/(Boltzmann_Hartree*T); 
 
     for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
@@ -956,7 +960,13 @@ void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv)
         ensemble[i].beta = beta;
         
         alloc_beads(&ensemble[i]);
-        sample_beads(&ensemble[i]);
+        // sample_beads(&ensemble[i]);
+        
+        for (size_t tslice = 0; tslice < ensemble[i].numTimeSlices; ++tslice) {
+            XC(ensemble[i].beads, tslice) = 5.0 + mt_drand();
+            YC(ensemble[i].beads, tslice) = 5.0 + mt_drand();
+            ZC(ensemble[i].beads, tslice) = 5.0 + mt_drand();
+        }
     }
     
     SetTargetFPS(60);
