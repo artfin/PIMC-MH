@@ -2,8 +2,9 @@
 #include <iomanip>
 #include <hep/mc-mpi.hpp>
 
-#define HEAR_IMPLEMENTATION
-#include "HeAr.h"
+// #define HEAR_IMPLEMENTATION
+// #include "HeAr.h"
+
 
 #define DIM 6
 #define IR 0
@@ -14,7 +15,7 @@
 #define IPTHETA 5
 
 const double Rmin = 4.0;
-const double Rmax = 30.0;
+const double Rmax = 20.0;
 
 const double RAMTOAMU          = 1822.888485332;
 const double Hartree           = 4.3597447222071e-18; // SI: J
@@ -26,9 +27,12 @@ const double AMU               = 9.10938356e-31;
 
 const double m_He = 4.00260325413 * RAMTOAMU;
 const double m_Ar = 39.9623831237 * RAMTOAMU;
-const double mu   = m_He * m_Ar / (m_He + m_Ar);  // a.u.
+// const double mu   = m_He * m_Ar / (m_He + m_Ar);  // a.u.
 
-const double Temperature = 300.0; // K
+#include "morse.h"
+const double mu = 12500.0;
+
+const double Temperature = 600.0; // K
 
 double Hamiltonian(double qp[])
 {
@@ -36,7 +40,7 @@ double Hamiltonian(double qp[])
 
     return qp[IPR]*qp[IPR]/2.0/mu + \
            qp[IPTHETA]*qp[IPTHETA]/2.0/mu/qp[IR]/qp[IR] + \
-           qp[IPPHI]*qp[IPPHI]/2.0/mu/qp[IR]/qp[IR]/sinTheta/sinTheta + V_HeAr(qp[IR]);
+           qp[IPPHI]*qp[IPPHI]/2.0/mu/qp[IR]/qp[IR]/sinTheta/sinTheta + morse(qp[IR]);
 }
 
 double numerator(hep::mc_point<double> const &x)
@@ -59,12 +63,12 @@ double numerator(hep::mc_point<double> const &x)
 
     double qp[DIM] = {R, pR, Theta, pTheta, Phi, pPhi};
     double en = Hamiltonian(qp);
-    
-    double dip = dip_HeAr(R);
-    double dipsq = dip*dip;
+
+    //double dip = dip_HeAr(R);
+    // double dipsq = dip*dip;
     // double dipsq = R;
 
-    double result = Jac * dipsq * std::exp(-en/Temperature/Boltzmann_Hartree);
+    double result = Jac * en * std::exp(-en/Temperature/Boltzmann_Hartree);
 	return result;
 }
 

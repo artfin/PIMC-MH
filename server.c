@@ -166,7 +166,11 @@ int main()
 
             double height;
             if (ylogscale) { 
-                height = log(gsl_histogram_get(h, i))/ymax * world.height;
+                if (gsl_histogram_get(h, i) > 0) {
+                    height = log(gsl_histogram_get(h, i))/ymax * world.height;
+                } else {
+                    height = 0.0;
+                }
             } else {
                 height = gsl_histogram_get(h, i)/ymax * world.height;
             }
