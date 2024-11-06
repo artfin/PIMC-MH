@@ -86,7 +86,7 @@ Font font = {0};
 #define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
 #define RMAX_COLLECT 30.0 // a.u.
-#define COORD_MAX    50.0 // a.u.
+#define COORD_MAX    40.0 // a.u.
 // ---------------------------------------------------------
 
 typedef struct {
@@ -202,7 +202,7 @@ double PotentialAction(Path path, size_t tslice)
                 ZC(path.beads, tslice)*ZC(path.beads, tslice); 
     double r = sqrt(r2);
 
-    //return path.tau * V_HeAr(r);
+    // return path.tau * V_HeAr(r);
     return path.tau * morse(r);
 }
 
@@ -269,6 +269,8 @@ double EnergyEstimator(Path path)
     return 3.0/2.0/path.tau - kin/path.numTimeSlices + pot/path.numTimeSlices;
 }
 
+void apply_burnin(Path path, size_t burnin_len);
+
 int COM_Move(Path path)
 {
     int result = 0;
@@ -320,6 +322,7 @@ int COM_Move(Path path)
         if (!within) {
             // printf("Resampling necklace\n");
             sample_beads(&path);
+            apply_burnin(path, 30);
         }
 
         return_defer(1);
@@ -441,6 +444,16 @@ int Simple_MH(Path path)
     }
 }
 
+void apply_burnin(Path path, size_t burnin_len) {
+    for (size_t i = 0; i < burnin_len; ++i) {
+        COM_Move(path);
+
+        if (path.numTimeSlices > 1) {
+            Staging_Move(path);
+        }
+    }
+}
+
 void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 {
     (void) ctx;
@@ -473,20 +486,20 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
             double rcom = sqrt(com[0]*com[0] + com[1]*com[1] + com[2]*com[2]); 
 
             if ((rcom > RMIN_COLLECT) && (rcom < RMAX_COLLECT)) {
-                // double m0_est = 0.0;
-                // 
-                // for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-                //     double dx = XC(path.beads, tslice)*XC(path.beads, tslice); 
-                //     double dy = YC(path.beads, tslice)*YC(path.beads, tslice); 
-                //     double dz = ZC(path.beads, tslice)*ZC(path.beads, tslice); 
-                //     double r = sqrt(dx*dx + dy*dy + dz*dz);
+                double m0_est = 0.0;
+                
+                for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+                    double r2 = XC(path.beads, tslice)*XC(path.beads, tslice) + 
+                                YC(path.beads, tslice)*YC(path.beads, tslice) + 
+                                ZC(path.beads, tslice)*ZC(path.beads, tslice); 
+                    double r = sqrt(r2);
 
-                //     double dipval = dip_HeAr(r);
-                //     m0_est += dipval*dipval/path.numTimeSlices; 
-                // }
+                    double dipval = dip_HeAr(r);
+                    m0_est = m0_est + dipval*dipval/path.numTimeSlices; 
+                }
 
-                //da_append(&trace.positions, rcom);
-                //da_append(&trace.m0s, m0_est);
+                // da_append(&trace.positions, rcom);
+                // da_append(&trace.m0s, m0_est);
                 da_append(&trace.energies, EnergyEstimator(path));
             }
 
@@ -684,7 +697,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     // double refVal = 2.14e-6;  // mean(mu^2) obtained with HEP: int(mu^2 exp(-V/kT))/int(exp(-V/kT)) 
     // double refVal = 1.655e-07;   // mean(mu^2) obtained with HEP [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
     // double refVal = 2.18387e-07; // mean(mu^2) obtained with HEP [400K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
- 
+
     // double refVal = 7.11076e-04; // mean(E) obtained with HEP [300 K] 
     double refVal = -9.05971e-03; // mean(E) for MORSE 
     int blockSize = 1; // TODO: ignore for now
@@ -825,7 +838,7 @@ void subcmd_visualize_necklace(MPI_Context ctx, int argc, char **argv)
     CloseWindow();
 }
     
-#define ENSEMBLE_SIZE 10 
+#define ENSEMBLE_SIZE 50 
 Path ensemble[ENSEMBLE_SIZE] = {0};
 
 void update_ensemble_frame()
@@ -953,7 +966,7 @@ void subcmd_visualize_ensemble(MPI_Context ctx, int argc, char **argv)
 
     load_resources();
 
-    double T = 50.0; // K
+    double T = 600.0; // K
     double beta = 1.0/(Boltzmann_Hartree*T); 
 
     for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
