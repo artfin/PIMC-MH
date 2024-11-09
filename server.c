@@ -3,6 +3,7 @@
 #include <math.h>
 #include <assert.h>
 #include <string.h>
+#include <float.h>
 
 #include <gsl/gsl_histogram.h>
 
@@ -14,6 +15,7 @@
 #define COLOR_BACKGROUND GetColor(0x181818FF)
 #define FONT_SIZE_LOAD 160 
 Font font = {0};
+int FONT_SIZE = 24; 
 
 #define COMMON_IMPLEMENTATION
 #include "common.h"
@@ -36,7 +38,9 @@ typedef struct {
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
 
-// TODO: Send a map (?) with a reference value with respect to which we display the difference
+#define return_defer(value) do { result = (value); goto defer; } while (0)
+
+// TODO: Send a map with a reference value with respect to which we display the difference
 
 // TODO: Customize the received values from client: we should receive an array of AVERAGES over N values, not raw data 
 //       - averageWindow is now read from window
@@ -45,6 +49,152 @@ typedef struct {
 
 gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h);
 gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h);
+
+bool get_histogram_ranges(Rectangle contentRect, const char *description, double *lhs, double *rhs, bool editMode)
+{
+    bool result = false;
+    
+    static bool editValueBox[2] = {0};
+    static char valTextBox[2][20] = {0};
+    
+    int margin = 15;
+    
+    if (!editMode) {
+        guiState = STATE_DISABLED;
+    }
+
+    GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, FONT_SIZE }, description);
+    contentRect.y += FONT_SIZE + margin;
+
+    // left range 
+    if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*FONT_SIZE }, valTextBox[0], 20, editValueBox[0]))
+    {
+        editValueBox[0] = !editValueBox[0];
+
+        if (!editValueBox[0]) {
+            // Try to convert text to float and assign it to the point
+            char *endPtr = NULL;
+            double value = strtod(valTextBox[0], &endPtr);
+            if (endPtr != valTextBox[0]) *lhs = value;
+            return_defer(true);
+        }
+    }
+
+    // right range 
+    if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*FONT_SIZE }, valTextBox[1], 20, editValueBox[1]))
+    {
+        editValueBox[1] = !editValueBox[1];
+
+        if (!editValueBox[1]) {
+            // Try to convert text to float and assign it to the point
+            char *endPtr = NULL;
+            double value = strtod(valTextBox[1], &endPtr);
+            if (endPtr != valTextBox[1]) *rhs = value;
+            return_defer(true);
+        }
+    }
+
+defer:
+    guiState = STATE_NORMAL;
+    return result; 
+}
+
+void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, double display_xmax, bool ylogscale)
+{
+    size_t nbins = h->n;
+    assert(nbins > 1);
+    
+    double xmin = h->range[0];
+    double dx = h->range[1] - h->range[0];
+    
+    double ymax = FLT_MIN; gsl_histogram_max_val(h);
+    
+    size_t displayed_nbins = 0;
+
+    for (size_t i = 0; i < nbins; ++i) {
+        double x = xmin + i*dx;
+        if (x < display_xmin) continue;
+        if (x > display_xmax) break;
+
+        double y = gsl_histogram_get(h, i);
+        if (y > ymax) ymax = y;
+
+        displayed_nbins++;
+    }
+
+    if (ylogscale) ymax = log(ymax);
+
+    double col_width = (displayed_nbins > 0) ? r.width / displayed_nbins : 0.0; 
+
+    for (size_t i = 0; i < nbins; ++i) 
+    {
+        double x = xmin + i*dx;
+        if (x < display_xmin) continue;
+        if (x > display_xmax) break;
+
+        double scale_height = 0.9;
+
+        double height;
+        if (ylogscale) { 
+            height = log(1.0f + gsl_histogram_get(h, i))/ymax * r.height;
+        } else {
+            height = gsl_histogram_get(h, i)/ymax * r.height;
+        }
+
+        Rectangle col = {
+            .x = r.x + i*col_width,
+            .y = r.y + r.height - scale_height*height, 
+            .width = col_width,
+            .height = scale_height*height, 
+        };
+
+        DrawRectangleLinesEx(col, 2.0, YELLOW);
+    }
+}
+
+void display_mean(Rectangle world, double mean, double display_xmin, double display_xmax)
+{
+    DrawLineEx(
+        CLITERAL(Vector2){
+        .x = world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width, 
+        .y = world.y,
+        },
+        CLITERAL(Vector2){
+        .x = world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width, 
+        .y = world.y + world.height,
+        }, 2.0, RED);
+
+    const char *buffer = TextFormat("%.3e", mean);
+    Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
+    Vector2 text_pos = {
+        world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width - 0.25*text_len.x,
+        world.y + world.height + 0.75 * text_len.y,
+    };
+    DrawTextEx(font, buffer, text_pos, FONT_SIZE, 0, RED);
+} 
+
+void display_xlabels(Rectangle world, double display_xmin, double display_xmax)
+{
+    {
+        const char *buffer = TextFormat("%.3e", display_xmin);
+        Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
+        Vector2 text_pos = {
+            world.x - 0.25 * text_len.x,
+            world.y + world.height + 0.25 * text_len.y,
+        };
+        DrawTextEx(font, buffer, text_pos, FONT_SIZE, 0, WHITE);
+    }
+
+    {
+        const char *buffer = TextFormat("%.3e", display_xmax);
+        Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
+        Vector2 text_pos = {
+            world.x + world.width - 0.25 * text_len.x,
+            world.y + world.height + 0.25 * text_len.y,
+        };
+        DrawTextEx(font, buffer, text_pos, FONT_SIZE, 0, WHITE);
+    }
+}
 
 int main()
 {
@@ -64,12 +214,13 @@ int main()
     int blockSize = 1;
     
     Trace tr = {0};
+    // Trace necklace_sizes = {0};
 
     size_t nbins = 20;
     gsl_histogram *h = gsl_histogram_alloc(nbins);
-
     gsl_histogram_set_ranges_uniform(h, -0.5, 0.5);
-    size_t samples_count = 0;
+   
+    size_t samples_count = 0; 
     size_t packets_count = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -80,24 +231,25 @@ int main()
     SetExitKey(KEY_Q);
    
     load_resources();
-    int font_size = 24; 
 
     GuiLoadStyleDark();
+    GuiSetStyle(CHECKBOX, TEXT_PADDING, 12);
 
     font.baseSize = 100; // @hack: increase the font size for GuiLabel
     GuiSetFont(font);
     font.baseSize = FONT_SIZE_LOAD;  
 
     bool ylogscale = false;  
-    // a pile of values... histogram range & average window size 
-    bool editValueBox[3] = { 0 };
-    char valTextBox[3][20] = { 0 };
+    bool xadaptive = true;
 
     SetTargetFPS(60);
 
     double mean = 0.0;
     double var = 0.0;
     double stdev = 0.0;
+
+    double display_xmin = h->range[0];
+    double display_xmax = h->range[nbins];
 
     while (!WindowShouldClose()) {
         BeginDrawing();
@@ -109,8 +261,11 @@ int main()
         nbins = h->n;
         double xmin = h->range[0];
         double xmax = h->range[nbins];
-        double ymax = gsl_histogram_max_val(h);
-        if (ylogscale) ymax = log(ymax);
+
+        if (xadaptive) {
+            display_xmin = xmin;
+            display_xmax = xmax;
+        }
 
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
     
@@ -122,8 +277,8 @@ int main()
             .width = simul_sz, 
             .height = simul_sz
         };
+        DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
             
-        double rect_width = world.width / nbins; 
    
         if (conn == NO_CONNECTION) {
             conn = acceptClientConnection(&sockfd);
@@ -160,184 +315,130 @@ int main()
             fcntl(sockfd, F_SETFL, flags); 
         } 
         
-        for (size_t i = 0; i < nbins; ++i) 
-        {
-            double factor = 0.9;
+        display_histogram(world, h, display_xmin, display_xmax, ylogscale);
 
-            double height;
-            if (ylogscale) { 
-                if (gsl_histogram_get(h, i) > 0) {
-                    height = log(gsl_histogram_get(h, i))/ymax * world.height;
-                } else {
-                    height = 0.0;
-                }
-            } else {
-                height = gsl_histogram_get(h, i)/ymax * world.height;
-            }
-
-            Rectangle r = {
-                .x = world.x + i*rect_width,
-                .y = world.y + world.height - factor*height, 
-                .width = rect_width,
-                .height = factor*height, 
-            };
-
-            DrawRectangleLinesEx(r, 2.0, YELLOW);
+        if (samples_count > 0) { 
+            display_mean(world, mean, display_xmin, display_xmax);      
         }
-        
-        DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
 
-        if (samples_count > 0) {
-            DrawLineEx(
-                CLITERAL(Vector2){
-                    .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
-                    .y = world.y,
-                },
-                CLITERAL(Vector2){
-                .x = world.x + (mean - xmin)/(xmax - xmin)*world.width, 
-                .y = world.y + world.height,
-                }, 2.0, RED);
+        display_xlabels(world, display_xmin, display_xmax);
 
-            const char *buffer = TextFormat("%.3e", mean);
-            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
-            Vector2 text_pos = {
-                world.x + (mean - xmin)/(xmax - xmin)*world.width - 0.25*text_len.x,
-                world.y + world.height + 0.75 * text_len.y,
-            };
-            DrawTextEx(font, buffer, text_pos, font_size, 0, RED);
-        }
-        
-        {
-            const char *buffer = TextFormat("%.3e", xmin);
-            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
-            Vector2 text_pos = {
-                world.x - 0.25 * text_len.x,
-                world.y + world.height + 0.25 * text_len.y,
-            };
-            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
-        }
-        {
-            const char *buffer = TextFormat("%.3e", xmax);
-            Vector2 text_len = MeasureTextEx(font, buffer, font_size, 0);
-            Vector2 text_pos = {
-                world.x + world.width - 0.25 * text_len.x,
-                world.y + world.height + 0.25 * text_len.y,
-            };
-            DrawTextEx(font, buffer, text_pos, font_size, 0, WHITE);
-        }
        
         GuiWindowBox(settingsRect, "Settings");
         
         int margin = 15;
-        Rectangle contentRect = (Rectangle) { settingsRect.x + margin, settingsRect.y + RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + margin, settingsRect.width, font_size };
+        Rectangle contentRect = (Rectangle) { settingsRect.x + margin, settingsRect.y + RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + margin, settingsRect.width, FONT_SIZE };
         
         if (conn == NO_CONNECTION) {
             GuiLabel(contentRect, TextFormat("Waiting for client connection..."));
-            contentRect.y += font_size;
+            contentRect.y += FONT_SIZE;
+        } else if (conn == CONNECTION_ESTABLISHED) {
+            GuiLabel(contentRect, TextFormat("Connection established with %s", get_client_ip()));
+            contentRect.y += FONT_SIZE;
         }
 
-        GuiCheckBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 1.5f*font_size, 1.5f*font_size }, "Y log scale", &ylogscale);
-        contentRect.y += font_size + margin;
-
-        if (conn == NO_CONNECTION) 
         {
-            GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, font_size }, "Histogram ranges");
-            contentRect.y += font_size + margin;
-           
-            // left range 
-            if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[0], 20, editValueBox[0]))
-            {
-                editValueBox[0] = !editValueBox[0];
+            GuiCheckBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 1.5f*FONT_SIZE, 1.5f*FONT_SIZE }, "Y logscale", &ylogscale);
+            GuiCheckBox((Rectangle){ contentRect.x + 0.5*contentRect.width, contentRect.y + contentRect.height, 1.5f*FONT_SIZE, 1.5f*FONT_SIZE }, "X adaptive", &xadaptive);
+            contentRect.y += FONT_SIZE + margin;
+        }
 
-                // Input ended
-                if (!editValueBox[0]) {
-                    // Try to convert text to float and assign it to the point
-                    char *endPtr = NULL;
-                    double value = strtod(valTextBox[0], &endPtr);
-                    if (endPtr != valTextBox[0]) gsl_histogram_set_ranges_uniform(h, value, xmax);
+
+        // TODO: display boxes for ranges of histogram all the time
+        // we could set INITIAL ranges and then modify the displayed range of the histogram
+        if (conn == NO_CONNECTION) {
+            double lhs = xmin;
+            double rhs = xmax;
+
+            if (get_histogram_ranges(contentRect, "Initial range:", &lhs, &rhs, true)) {
+                if (lhs < rhs) {
+                    gsl_histogram_set_ranges_uniform(h, lhs, rhs);
+                    display_xmin = lhs;
+                    display_xmax = rhs; 
+
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff);  
+                } else {
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0xff0000ff);
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xff0000ff);  
                 }
             }
+        } else if (conn == CONNECTION_ESTABLISHED) {
+            double lhs = display_xmin;
+            double rhs = display_xmax;
 
-            // right range 
-            if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[1], 20, editValueBox[1]))
-            {
-                editValueBox[1] = !editValueBox[1];
+            if (get_histogram_ranges(contentRect, "Display range:", &lhs, &rhs, !xadaptive)) {
+                if (lhs < rhs) {
+                    display_xmin = lhs;
+                    display_xmax = rhs; 
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff); 
 
-                // Input ended
-                if (!editValueBox[1])
-                {
-                    // Try to convert text to float and assign it to the point
-                    char *endPtr = NULL;
-                    double value = strtod(valTextBox[1], &endPtr);
-                    if (endPtr != valTextBox[1]) gsl_histogram_set_ranges_uniform(h, xmin, value);
+                    printf("------------\n");
+                    printf("display_xmin = %.3lf, display_xmax = %.3lf\n", display_xmin, display_xmax); 
+                    printf("------------\n"); 
+                } else {
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0xff0000ff);
+                    GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xff0000ff);  
                 }
             }
+        }
 
-            // contentRect.y += font_size + margin;
-            // GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height, contentRect.width, font_size }, "Block size (on client)");
-            // contentRect.y += font_size + margin;
-            // 
-            // if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height, 0.4*contentRect.width, 1.5f*font_size }, valTextBox[2], 20, editValueBox[2]))
-            // {
-            //     editValueBox[2] = !editValueBox[2];
+        contentRect.y += contentRect.height; 
 
-            //     // Input ended
-            //     if (!editValueBox[2]) {
-            //         int value = atoi(valTextBox[2]);
-            //         if (value != 0) blockSize = value;  
-            //     }
-            // }
-
-        } else if (parameters_exchanged) {
-            contentRect.height += font_size + 2*margin;
+        if (parameters_exchanged) {
+            contentRect.y += FONT_SIZE + 4*margin;
             
-            if (conn == CONNECTION_ESTABLISHED) {
-                GuiLabel(contentRect, TextFormat("Connection established with %s", get_client_ip()));
-                contentRect.height += font_size + 2*margin;
-
-                GuiLabel(contentRect, TextFormat("client processes: %d", nclients));
-                contentRect.height += font_size + margin;
-            }
+            GuiLabel(contentRect, TextFormat("client processes: %d", nclients));
+            contentRect.y += 0.9*FONT_SIZE;
 
             T = 1.0 / (beta * Boltzmann_Hartree);
             GuiLabel(contentRect, TextFormat("T: %.2f", T));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("time slices: %d", numTimeSlices));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("Samples: %zu", samples_count));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("Packets: %zu", packets_count));
-            contentRect.height += font_size + margin;
-            
+            contentRect.y += 0.9*FONT_SIZE;
+           
+            GuiLabel(contentRect, TextFormat("Collected min: %.3e", xmin));
+            contentRect.y += 0.9*FONT_SIZE;
+
+            GuiLabel(contentRect, TextFormat("Collected max: %.3e", xmax));
+            contentRect.y += 0.9*FONT_SIZE;
+
             GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("Mean: %.5e", mean));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             double exp_error = stdev/sqrt(samples_count);
             GuiLabel(contentRect, TextFormat("Error estimate: %.5e", exp_error));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("Reference: %.5e", refval));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             double actual_error = mean - refval; 
             GuiLabel(contentRect, TextFormat("Actual error: %.5e", actual_error));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
             
             double rel_error = fabs(actual_error) / refval;
             GuiLabel(contentRect, TextFormat("Relative error: %.3f%%", rel_error*100.0));
-            contentRect.height += font_size + margin;
+            contentRect.y += 0.9*FONT_SIZE;
         }
 
         EndDrawing();
-       
-        if (conn == CONNECTION_ESTABLISHED) { 
-            SocketOpResult r = recvFloat64Array(sockfd, &tr.items, &tr.count);
+      
+        if (conn == CONNECTION_ESTABLISHED) {
+            SocketOpResult r; 
+            r = recvFloat64Array(sockfd, &tr.items, &tr.count);
+            // r = recvFloat64Array(sockfd, &necklace_sizes.items, &necklace_sizes.count);
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");

@@ -103,6 +103,7 @@ typedef struct {
     size_t numTimeSlices;
     double tau;
     double beta;
+    size_t steps_since_birth;
 } Path;
 
 typedef struct {
@@ -115,24 +116,13 @@ typedef struct {
     double *items;
     size_t count;
     size_t capacity;
-} M0_Trace;
+} DA;
 
 typedef struct {
-    double *items;
-    size_t count;
-    size_t capacity;
-} PositionTrace;
-
-typedef struct {
-    double *items;
-    size_t count;
-    size_t capacity;
-} EnergyTrace;
-
-typedef struct {
-    PositionTrace positions;
-    M0_Trace m0s;
-    EnergyTrace energies;
+    DA positions;
+    DA m0s;
+    DA energies;
+    DA necklace_sizes; 
 } PIMC_Trace;
 
 PIMC_Trace trace = {0};
@@ -188,6 +178,8 @@ double sample_bead()
 
 void sample_beads(Path *path)
 {
+    path->steps_since_birth = 0;
+
     for (size_t i = 0; i < 3*path->numTimeSlices; ++i) {
         path->beads[i] = sample_bead(); 
     }
@@ -269,9 +261,9 @@ double EnergyEstimator(Path path)
     return 3.0/2.0/path.tau - kin/path.numTimeSlices + pot/path.numTimeSlices;
 }
 
-void apply_burnin(Path path, size_t burnin_len);
+void apply_burnin(Path *path, size_t burnin_len);
 
-int COM_Move(Path path)
+int COM_Move(Path *path)
 {
     int result = 0;
 
@@ -281,25 +273,25 @@ int COM_Move(Path path)
     double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
 
     double oldAction = 0.0;
-    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        oldAction = oldAction + PotentialAction(path, tslice);
+    for (size_t tslice = 0; tslice < path->numTimeSlices; ++tslice) {
+        oldAction = oldAction + PotentialAction(*path, tslice);
     } 
     
-    double *oldbeads = (double*) arena_alloc(&arena, path.numTimeSlices * 3*sizeof(double));
-    memset(oldbeads, 0.0, path.numTimeSlices * 3*sizeof(double));
+    double *oldbeads = (double*) arena_alloc(&arena, path->numTimeSlices * 3*sizeof(double));
+    memset(oldbeads, 0.0, path->numTimeSlices * 3*sizeof(double));
 
-    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        XC(oldbeads, tslice) = XC(path.beads, tslice);
-        YC(oldbeads, tslice) = YC(path.beads, tslice);
-        ZC(oldbeads, tslice) = ZC(path.beads, tslice);
-        XC(path.beads, tslice) = XC(path.beads, tslice) + shiftx;
-        YC(path.beads, tslice) = YC(path.beads, tslice) + shifty;
-        ZC(path.beads, tslice) = ZC(path.beads, tslice) + shiftz;
+    for (size_t tslice = 0; tslice < path->numTimeSlices; ++tslice) {
+        XC(oldbeads, tslice) = XC(path->beads, tslice);
+        YC(oldbeads, tslice) = YC(path->beads, tslice);
+        ZC(oldbeads, tslice) = ZC(path->beads, tslice);
+        XC(path->beads, tslice) = XC(path->beads, tslice) + shiftx;
+        YC(path->beads, tslice) = YC(path->beads, tslice) + shifty;
+        ZC(path->beads, tslice) = ZC(path->beads, tslice) + shiftz;
     }
 
     double newAction = 0.0;
-    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-        newAction = newAction + PotentialAction(path, tslice);
+    for (size_t tslice = 0; tslice < path->numTimeSlices; ++tslice) {
+        newAction = newAction + PotentialAction(*path, tslice);
     }
     
     // accept the move, or reject and restore the bead positions
@@ -309,10 +301,10 @@ int COM_Move(Path path)
     if (u < alpha) {
         bool within = true;
 
-        for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-            if ((XC(path.beads, tslice) > COORD_MAX) || (XC(path.beads, tslice) < -COORD_MAX) || 
-                (YC(path.beads, tslice) > COORD_MAX) || (YC(path.beads, tslice) < -COORD_MAX) || 
-                (ZC(path.beads, tslice) > COORD_MAX) || (ZC(path.beads, tslice) < -COORD_MAX)) 
+        for (size_t tslice = 0; tslice < path->numTimeSlices; ++tslice) {
+            if ((XC(path->beads, tslice) > COORD_MAX) || (XC(path->beads, tslice) < -COORD_MAX) || 
+                (YC(path->beads, tslice) > COORD_MAX) || (YC(path->beads, tslice) < -COORD_MAX) || 
+                (ZC(path->beads, tslice) > COORD_MAX) || (ZC(path->beads, tslice) < -COORD_MAX)) 
             {
                 within = false;
                 break;
@@ -321,16 +313,17 @@ int COM_Move(Path path)
 
         if (!within) {
             // printf("Resampling necklace\n");
-            sample_beads(&path);
+            sample_beads(path);
             apply_burnin(path, 30);
         }
 
+        path->steps_since_birth++;
         return_defer(1);
     } else {
-        for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-            XC(path.beads, tslice) = XC(oldbeads, tslice);
-            YC(path.beads, tslice) = YC(oldbeads, tslice);
-            ZC(path.beads, tslice) = ZC(oldbeads, tslice);
+        for (size_t tslice = 0; tslice < path->numTimeSlices; ++tslice) {
+            XC(path->beads, tslice) = XC(oldbeads, tslice);
+            YC(path->beads, tslice) = YC(oldbeads, tslice);
+            ZC(path->beads, tslice) = ZC(oldbeads, tslice);
         }
 
         return_defer(0);
@@ -341,61 +334,62 @@ defer:
     return result;
 }
 
-int Staging_Move(Path path)
+int Staging_Move(Path *path)
 // http://link.aps.org/doi/10.1103/PhysRevB.31.4234
 {
     // NOTE: how should we set the stage length?  
-    size_t stage_len = path.numTimeSlices/2; 
-    assert(stage_len < path.numTimeSlices);
+    size_t stage_len = path->numTimeSlices/2; 
+    assert(stage_len < path->numTimeSlices);
 
     int result = 0;
 
-    size_t alpha_start = mt_lrand() % path.numTimeSlices;
-    size_t alpha_end = (alpha_start + stage_len) % path.numTimeSlices; 
+    size_t alpha_start = mt_lrand() % path->numTimeSlices;
+    size_t alpha_end = (alpha_start + stage_len) % path->numTimeSlices; 
 
-    double *oldbeads = (double*) arena_alloc(&arena, path.numTimeSlices * 3*sizeof(double));
+    double *oldbeads = (double*) arena_alloc(&arena, path->numTimeSlices * 3*sizeof(double));
     
     double oldAction = 0.0;
     for (size_t i = 1; i < stage_len; ++i) {
-        size_t tslice = (alpha_start + i) % path.numTimeSlices;
+        size_t tslice = (alpha_start + i) % path->numTimeSlices;
 
-        XC(oldbeads, i - 1) = XC(path.beads, tslice);
-        YC(oldbeads, i - 1) = YC(path.beads, tslice);
-        ZC(oldbeads, i - 1) = ZC(path.beads, tslice);
-        oldAction = oldAction + PotentialAction(path, tslice);
+        XC(oldbeads, i - 1) = XC(path->beads, tslice);
+        YC(oldbeads, i - 1) = YC(path->beads, tslice);
+        ZC(oldbeads, i - 1) = ZC(path->beads, tslice);
+        oldAction = oldAction + PotentialAction(*path, tslice);
     }
 
     double newAction = 0.0;
     for (size_t i = 1; i < stage_len; ++i) {
-        size_t tslice = (alpha_start + i) % path.numTimeSlices;
-        size_t tslicem1 = (tslice - 1) % path.numTimeSlices;
+        size_t tslice = (alpha_start + i) % path->numTimeSlices;
+        size_t tslicem1 = (tslice - 1) % path->numTimeSlices;
 
-        double tau1 = (stage_len - i) * path.tau;
+        double tau1 = (stage_len - i) * path->tau;
 
-        double avx = (tau1*XC(path.beads, tslicem1) + path.tau*XC(path.beads, alpha_end))/(path.tau+tau1);
-        double avy = (tau1*YC(path.beads, tslicem1) + path.tau*YC(path.beads, alpha_end))/(path.tau+tau1);
-        double avz = (tau1*ZC(path.beads, tslicem1) + path.tau*ZC(path.beads, alpha_end))/(path.tau+tau1);
+        double avx = (tau1*XC(path->beads, tslicem1) + path->tau*XC(path->beads, alpha_end))/(path->tau+tau1);
+        double avy = (tau1*YC(path->beads, tslicem1) + path->tau*YC(path->beads, alpha_end))/(path->tau+tau1);
+        double avz = (tau1*ZC(path->beads, tslicem1) + path->tau*ZC(path->beads, alpha_end))/(path->tau+tau1);
 
-        double sigma2 = 2.0*lam / (1.0/path.tau + 1.0/tau1);
+        double sigma2 = 2.0*lam / (1.0/path->tau + 1.0/tau1);
         
-        XC(path.beads, tslice) = avx + sqrt(sigma2)*generate_normal(1.0);
-        YC(path.beads, tslice) = avy + sqrt(sigma2)*generate_normal(1.0);
-        ZC(path.beads, tslice) = avz + sqrt(sigma2)*generate_normal(1.0); 
+        XC(path->beads, tslice) = avx + sqrt(sigma2)*generate_normal(1.0);
+        YC(path->beads, tslice) = avy + sqrt(sigma2)*generate_normal(1.0);
+        ZC(path->beads, tslice) = avz + sqrt(sigma2)*generate_normal(1.0); 
 
-        newAction = newAction + PotentialAction(path, tslice); 
+        newAction = newAction + PotentialAction(*path, tslice); 
     }
 
     double u = mt_drand();
     double alpha = exp(-(newAction - oldAction));
   
     if (u < alpha) {
+        path->steps_since_birth++;
         return_defer(1);
     } else {
         for (size_t i = 1; i < stage_len; ++i) {
-            size_t tslice = (alpha_start + i) % path.numTimeSlices;
-            XC(path.beads, tslice) = XC(oldbeads, i - 1);
-            YC(path.beads, tslice) = YC(oldbeads, i - 1);
-            ZC(path.beads, tslice) = ZC(oldbeads, i - 1);
+            size_t tslice = (alpha_start + i) % path->numTimeSlices;
+            XC(path->beads, tslice) = XC(oldbeads, i - 1);
+            YC(path->beads, tslice) = YC(oldbeads, i - 1);
+            ZC(path->beads, tslice) = ZC(oldbeads, i - 1);
         }
 
         return_defer(0);
@@ -444,13 +438,74 @@ int Simple_MH(Path path)
     }
 }
 
-void apply_burnin(Path path, size_t burnin_len) {
-    for (size_t i = 0; i < burnin_len; ++i) {
-        COM_Move(path);
+void apply_burnin(Path *path, size_t burnin_len) {
+    
+    for (size_t steps = 0; steps < burnin_len; ) {
+        steps += COM_Move(path);
 
-        if (path.numTimeSlices > 1) {
-            Staging_Move(path);
+        if (path->numTimeSlices > 1) {
+            steps += Staging_Move(path);
         }
+    }
+}
+
+double compute_necklace_size(Path path)
+{
+    double com[3] = {0};
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        com[0] += XC(path.beads, tslice) / path.numTimeSlices; 
+        com[1] += YC(path.beads, tslice) / path.numTimeSlices; 
+        com[2] += ZC(path.beads, tslice) / path.numTimeSlices; 
+    }
+
+    double necklace_size = 0.0; 
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        double dx = XC(path.beads, tslice) - com[0];
+        double dy = YC(path.beads, tslice) - com[1];
+        double dz = ZC(path.beads, tslice) - com[2];
+
+        necklace_size = dx*dx + dy*dy + dz*dz;
+    }
+
+    return sqrt(necklace_size)/path.numTimeSlices;
+}
+
+void gather_and_send_to_server(MPI_Context ctx, int sockfd, double *send_items, size_t *send_count, size_t *packets_sent)
+{
+    size_t packet_size = 1000;
+    assert(packet_size <= 1000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+    
+    if (*send_count >= packet_size) {
+#ifndef NO_MPI
+        if (ctx.rank > 0) {
+            MPI_Send(send_items, packet_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+            *send_count = 0;
+        } else {
+#endif // NO_MPI
+            sendFloat64Array(sockfd, send_items, *send_count); (*packets_sent)++;
+            *send_count = 0;
+#ifndef NO_MPI
+            MPI_Status status = {0}; 
+            for (int i = 1; i < ctx.size; ++i) {
+                MPI_Recv(send_items, packet_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                *send_count = packet_size;
+                sendFloat64Array(sockfd, send_items, *send_count); (*packets_sent)++;
+                *send_count = 0;
+            }
+
+            if (*packets_sent % 100 == 0) { 
+                printf("Sent %zu packets...\n", *packets_sent);
+            }
+        } 
+#endif // NO_MPI
+    }
+}
+
+void print_necklace(Path path) {
+    printf("Steps since birth: %zu\n", path.steps_since_birth);
+
+    for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+        printf("x = %.3f y = %.3f z = %.3f\n", XC(path.beads, tslice), YC(path.beads, tslice), ZC(path.beads, tslice));
     }
 }
 
@@ -464,18 +519,16 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
     printf("Total MC steps: %zu\n", numSteps);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
 
-    size_t send_size = 1000;
-    assert(send_size <= 1000 && " NOTE: keep the send_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
     size_t packets_sent = 0;
 
     for (size_t step = 0; step < numSteps; ++step) {
-        acc.CenterOfMass += COM_Move(path);
+        acc.CenterOfMass += COM_Move(&path);
 
         if (path.numTimeSlices > 1) {
-            acc.Staging += Staging_Move(path);
+            acc.Staging += Staging_Move(&path);
         }
 
-        if (step % observableSkip == 0) {
+        if (path.steps_since_birth > 0 && (path.steps_since_birth % observableSkip == 0)) {
             double com[3] = {0}; 
             for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
                 com[0] += XC(path.beads, tslice) / path.numTimeSlices; 
@@ -500,38 +553,28 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
                 // da_append(&trace.positions, rcom);
                 // da_append(&trace.m0s, m0_est);
-                da_append(&trace.energies, EnergyEstimator(path));
+                
+                double en = EnergyEstimator(path);
+                // if (en < -10) {
+                //     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
+                //         printf("x = %.3f y = %.3f z = %.3f\n", XC(path.beads, tslice), YC(path.beads, tslice), ZC(path.beads, tslice));
+                //     }
+
+                //     msleep(1000);
+                // } 
+                
+                da_append(&trace.energies, en);
+
+                double necklace_size = compute_necklace_size(path); 
+                if (necklace_size > 0.2) {
+                    print_necklace(path);
+                    msleep(1000);
+                }
+                da_append(&trace.necklace_sizes, necklace_size);
             }
 
-            double **send_items = &trace.energies.items;
-            size_t *send_count = &trace.energies.count;           
-
-
-            if (*send_count >= send_size) {
-#ifndef NO_MPI
-                if (ctx.rank > 0) {
-                    MPI_Send(*send_items, send_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-                    *send_count = 0;
-                } else {
-#endif // NO_MPI
-                    sendFloat64Array(sockfd, *send_items, *send_count); packets_sent++;
-                    *send_count = 0;
-#ifndef NO_MPI
-                    MPI_Status status = {0}; 
-                    for (int i = 1; i < ctx.size; ++i) {
-                        MPI_Recv(*send_items, send_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                        *send_count = send_size;
-                        sendFloat64Array(sockfd, *send_items, *send_count); packets_sent++;
-                        *send_count = 0;
-                    }
-                   
-                    if (packets_sent % 100 == 0) { 
-                        printf("Sent %zu packets...\n", packets_sent);
-                    }
-                } 
-#endif // NO_MPI
-            
-            }
+            // gather_and_send_to_server(ctx, sockfd, trace.energies.items, &trace.energies.count, &packets_sent);
+            gather_and_send_to_server(ctx, sockfd, trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
         } 
     }
 
@@ -745,9 +788,9 @@ void update_necklace_frame(Path path)
         printf("Simulation step: %d\n", simulation_step);
 
         if (simulation_step % 2 == 0) {
-            COM_Move(path);
+            COM_Move(&path);
         } else {
-            Staging_Move(path);
+            Staging_Move(&path);
         }
 
         simulation_step++;
@@ -849,8 +892,8 @@ void update_ensemble_frame()
     static size_t acc = 0;
 
     for (size_t i = 0; i < ENSEMBLE_SIZE; ++i) {
-        acc += COM_Move(ensemble[i]);
-        acc += Staging_Move(ensemble[i]);
+        acc += COM_Move(&ensemble[i]);
+        acc += Staging_Move(&ensemble[i]);
         // acc += Simple_MH(ensemble[i]);
     }
 
