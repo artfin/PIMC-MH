@@ -30,6 +30,11 @@ typedef struct {
     size_t capacity;
 } Trace;
 
+typedef struct {
+    double min;
+    double max;
+} Range; 
+
 #define Hartree           4.3597447222071e-18 // SI: J 
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
@@ -98,7 +103,7 @@ defer:
     return result; 
 }
 
-void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, double display_xmax, bool ylogscale)
+void display_histogram(Rectangle r, gsl_histogram *h, Range display_range, bool ylogscale)
 {
     size_t nbins = h->n;
     assert(nbins > 1);
@@ -110,8 +115,8 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
 
     for (size_t i = 0; i < nbins; ++i) {
         double x = xmin + i*dx;
-        if (x < display_xmin) continue;
-        if (x + dx > display_xmax) break;
+        if (x < display_range.min) continue;
+        if (x + dx > display_range.max) break;
 
         double y = gsl_histogram_get(h, i);
         if (y > ymax) ymax = y;
@@ -127,8 +132,8 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
     for (size_t i = 0; i < nbins; ++i) 
     {
         double x = xmin + i*dx;
-        if (x < display_xmin) continue;
-        if (x + dx > display_xmax) break;
+        if (x < display_range.min) continue;
+        if (x + dx > display_range.max) break;
 
         double scale_height = 0.9;
 
@@ -151,31 +156,31 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
     }
 }
 
-void display_mean(Rectangle world, double mean, double display_xmin, double display_xmax)
+void display_mean(Rectangle world, double mean, Range display_range)
 {
     DrawLineEx(
         CLITERAL(Vector2){
-        .x = world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width, 
+        .x = world.x + (mean - display_range.min)/(display_range.max - display_range.min)*world.width, 
         .y = world.y,
         },
         CLITERAL(Vector2){
-        .x = world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width, 
+        .x = world.x + (mean - display_range.min)/(display_range.max - display_range.min)*world.width, 
         .y = world.y + world.height,
         }, 2.0, RED);
 
     const char *buffer = TextFormat("%.3e", mean);
     Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
     Vector2 text_pos = {
-        world.x + (mean - display_xmin)/(display_xmax - display_xmin)*world.width - 0.25*text_len.x,
+        world.x + (mean - display_range.min)/(display_range.max - display_range.min)*world.width - 0.25*text_len.x,
         world.y + world.height + 0.75 * text_len.y,
     };
     DrawTextEx(font, buffer, text_pos, FONT_SIZE, 0, RED);
 } 
 
-void display_xlabels(Rectangle world, double display_xmin, double display_xmax)
+void display_xlabels(Rectangle world, Range display_range)
 {
     {
-        const char *buffer = TextFormat("%.3e", display_xmin);
+        const char *buffer = TextFormat("%.3e", display_range.min);
         Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
         Vector2 text_pos = {
             world.x - 0.25 * text_len.x,
@@ -185,7 +190,7 @@ void display_xlabels(Rectangle world, double display_xmin, double display_xmax)
     }
 
     {
-        const char *buffer = TextFormat("%.3e", display_xmax);
+        const char *buffer = TextFormat("%.3e", display_range.max);
         Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
         Vector2 text_pos = {
             world.x + world.width - 0.25 * text_len.x,
@@ -231,6 +236,7 @@ void show_grid(Rectangle world)
 
 #define MAX_TABS 3
 char tab_names[MAX_TABS][MAX_NAME_SIZE] = {0};
+
 
 int main()
 {
@@ -291,10 +297,15 @@ int main()
     // 2) stored in histogram (hist_xmin, hist_xmax)
     // 3) actual data (data_xmin, data_xmax)
 
-    double data_xmin = FLT_MAX;
-    double data_xmax = FLT_MIN;
-    double display_xmin = h->range[0];
-    double display_xmax = h->range[nbins];
+    Range data_range = { 
+        .min = FLT_MAX, 
+        .max = FLT_MIN 
+    };
+
+    Range display_range = { 
+        .min = h->range[0],
+        .max = h->range[nbins]
+    };
 
     while (!WindowShouldClose()) {
         BeginDrawing();
@@ -304,12 +315,14 @@ int main()
         int screen_height = GetScreenHeight();
     
         nbins = h->n;
-        double hist_xmin = h->range[0];
-        double hist_xmax = h->range[nbins];
+        Range hist_range = {
+            .min = h->range[0],
+            .max = h->range[nbins]
+        };
 
         if (xadaptive) {
-            display_xmin = hist_xmin;
-            display_xmax = hist_xmax;
+            display_range.min = hist_range.min;
+            display_range.max = hist_range.max;
         }
 
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
@@ -366,13 +379,13 @@ int main()
         } 
         
         show_grid(world);
-        display_histogram(world, h, display_xmin, display_xmax, ylogscale);
+        display_histogram(world, h, display_range, ylogscale);
 
         if (samples_count > 0) { 
-            display_mean(world, mean, display_xmin, display_xmax);      
+            display_mean(world, mean, display_range);      
         }
 
-        display_xlabels(world, display_xmin, display_xmax);
+        display_xlabels(world, display_range);
 
        
         GuiWindowBox(settingsRect, "Settings");
@@ -398,14 +411,14 @@ int main()
         // TODO: display boxes for ranges of histogram all the time
         // we could set INITIAL ranges and then modify the displayed range of the histogram
         if (conn == NO_CONNECTION) {
-            double lhs = hist_xmin;
-            double rhs = hist_xmax;
+            double lhs = hist_range.min;
+            double rhs = hist_range.max;
 
             if (get_histogram_ranges(contentRect, "Initial range:", &lhs, &rhs, true)) {
                 if (lhs < rhs) {
                     gsl_histogram_set_ranges_uniform(h, lhs, rhs);
-                    display_xmin = lhs;
-                    display_xmax = rhs; 
+                    display_range.min = lhs;
+                    display_range.max = rhs; 
 
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff);  
@@ -415,13 +428,13 @@ int main()
                 }
             }
         } else if (conn == CONNECTION_ESTABLISHED) {
-            double lhs = display_xmin;
-            double rhs = display_xmax;
+            double lhs = display_range.min;
+            double rhs = display_range.max;
 
             if (get_histogram_ranges(contentRect, "Display range:", &lhs, &rhs, !xadaptive)) {
                 if (lhs < rhs) {
-                    display_xmin = lhs;
-                    display_xmax = rhs; 
+                    display_range.min = lhs;
+                    display_range.max = rhs; 
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff); 
                 } else {
@@ -452,10 +465,10 @@ int main()
             GuiLabel(contentRect, TextFormat("Packets: %zu", packets_count));
             contentRect.y += 0.9*FONT_SIZE;
            
-            GuiLabel(contentRect, TextFormat("Data min: %.3e", data_xmin));
+            GuiLabel(contentRect, TextFormat("Data min: %.3e", data_range.min));
             contentRect.y += 0.9*FONT_SIZE;
 
-            GuiLabel(contentRect, TextFormat("Data max: %.3e", data_xmax));
+            GuiLabel(contentRect, TextFormat("Data max: %.3e", data_range.max));
             contentRect.y += 0.9*FONT_SIZE;
 
             GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
@@ -514,8 +527,8 @@ int main()
                     gsl_histogram_increment(h, tr.items[i]);
                     packet_mean += tr.items[i];
 
-                    if (tr.items[i] > data_xmax) data_xmax = tr.items[i];
-                    if (tr.items[i] < data_xmin) data_xmin = tr.items[i];
+                    if (tr.items[i] > data_range.max) data_range.max = tr.items[i];
+                    if (tr.items[i] < data_range.min) data_range.min = tr.items[i];
                 }
                 packet_mean /= tr.count;
 
