@@ -25,6 +25,8 @@
 #define PORT 6969 
 #define MAX_CONNECTIONS 5
 
+#define MAX_NAME_SIZE 20
+
 typedef enum {
     SOCKOP_SUCCESS = 0,
     SOCKOP_WAITING, 
@@ -43,6 +45,7 @@ typedef enum {
     MSG_CHAR = 0,
     MSG_INT32,
     MSG_FLOAT64,
+    MSG_NAMED_FLOAT64,
 } MessageKind;
 
 
@@ -92,6 +95,9 @@ typedef struct {
 // void serialize_message(Message *message, uint32_t *bytes_length, uint8_t **bytes); // TODO: what is the approach here? 
 Message* deserialize_message(MessageKind kind, uint32_t bytes_length, uint8_t *bytes);
 
+SocketOpResult sendNamedFloat64Array(int sockfd, const char *name, double *data, size_t count);
+SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, size_t *count);
+
 SocketOpResult sendFloat64Array(int sockfd, double *data, size_t count);
 SocketOpResult recvFloat64Array(int sockfd, double **data, size_t *count);
 
@@ -124,6 +130,7 @@ Message* deserialize_message(MessageKind kind, uint32_t payload_length, uint8_t 
 
     return message; 
 }
+
 
 SocketOpResult w_send(int sockfd, const void *buf, size_t len) {
     ssize_t bytes_sent = send(sockfd, buf, len, 0);
@@ -289,6 +296,11 @@ SocketOpResult recvFixedLengthString(int sockfd, char **buffer, size_t *count)
 int initClient()
 {
     int sockfd = socket(SOCKET_TYPE, SOCK_STREAM, 0);
+    
+    // allows reusing the socket address when the previous run of the application
+    // exited with an error and did not properly closed the socket
+    int option = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
 
 #ifdef USE_UNIX_SOCKET
     SOCKET_ADDR server_addr;
@@ -332,9 +344,14 @@ void initServer()
 {
     server_socket = socket(SOCKET_TYPE, SOCK_STREAM, 0);
     if (server_socket < 0) {
-        fprintf(stderr, "ERROR: could not create the server socket\n");
+        fprintf(stderr, "ERROR: could not create the server socket: %s\n", strerror(errno));
         exit(1);
     }
+
+    // allows reusing the socket address when the previous run of the application
+    // exited with an error and did not properly closed the socket
+    int option = 1;
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
 
     int flags = fcntl(server_socket, F_GETFL, 0);
     flags |= O_NONBLOCK;
@@ -418,6 +435,54 @@ ConnectionStatus acceptClientConnection(int *data_socket)
 
     return CONNECTION_ESTABLISHED; 
 }
+
+SocketOpResult sendNamedFloat64Array(int sockfd, const char *name, double *data, size_t count)
+{
+    uint32_t payload_length = MAX_NAME_SIZE*sizeof(char) + count*sizeof(double);
+
+    Message *message = (Message*) arena_alloc(&arena, sizeof(message) + payload_length);
+    message->size = sizeof(message) + payload_length;
+    message->kind = MSG_NAMED_FLOAT64;
+
+    assert(strlen(name) < MAX_NAME_SIZE);
+    memcpy(message->payload, name, MAX_NAME_SIZE*sizeof(char));
+    memcpy(message->payload + MAX_NAME_SIZE*sizeof(char), data, count*sizeof(double));
+        
+    return w_send(sockfd, message, message->size); 
+}
+
+SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, size_t *count)
+{
+    SocketOpResult res;
+    uint32_t sz;
+    
+    res = w_recv(sockfd, &sz, sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res; 
+    
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    memcpy(bytes, &sz, sizeof(uint32_t));
+
+    res = w_recv(sockfd, bytes + sizeof(uint32_t), sz - sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res; 
+    
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_NAMED_FLOAT64);
+
+    *name = bytes + sizeof(uint32_t) + sizeof(MessageKind);
+
+    size_t payload_len = sz - sizeof(uint32_t) - sizeof(MessageKind) - MAX_NAME_SIZE*sizeof(char); 
+    assert(payload_len % sizeof(double) == 0);
+    
+    *count = payload_len / sizeof(double);
+    *data = bytes + sizeof(uint32_t) + sizeof(MessageKind) + MAX_NAME_SIZE*sizeof(char);
+
+    if (_verbose) {
+        printf("(recvNamedFloat64Array): message contents = [name = %.*s, %u bytes, %zu float64s] %.3lf ...\n", MAX_NAME_SIZE, *name, sz, *count, (*data)[0]);
+    }
+    
+    return SOCKOP_SUCCESS; 
+} 
 
 #endif // PROTOCOL_IMPLEMENTATION 
 

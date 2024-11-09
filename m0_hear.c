@@ -470,7 +470,7 @@ double compute_necklace_size(Path path)
     return sqrt(necklace_size)/path.numTimeSlices;
 }
 
-void gather_and_send_to_server(MPI_Context ctx, int sockfd, double *send_items, size_t *send_count, size_t *packets_sent)
+void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_name, double *send_items, size_t *send_count, size_t *packets_sent)
 {
     size_t packet_size = 1000;
     assert(packet_size <= 1000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
@@ -482,14 +482,18 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, double *send_items, 
             *send_count = 0;
         } else {
 #endif // NO_MPI
-            sendFloat64Array(sockfd, send_items, *send_count); (*packets_sent)++;
+
+            sendNamedFloat64Array(sockfd, data_name, send_items, *send_count);
+            (*packets_sent)++;
             *send_count = 0;
 #ifndef NO_MPI
             MPI_Status status = {0}; 
             for (int i = 1; i < ctx.size; ++i) {
                 MPI_Recv(send_items, packet_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                 *send_count = packet_size;
-                sendFloat64Array(sockfd, send_items, *send_count); (*packets_sent)++;
+            
+                sendNamedFloat64Array(sockfd, data_name, send_items, *send_count); 
+                (*packets_sent)++;
                 *send_count = 0;
             }
 
@@ -515,7 +519,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
     AcceptanceRate acc = {0};
 
-    size_t observableSkip = 50;
+    size_t observableSkip = 80;
     printf("Total MC steps: %zu\n", numSteps);
     printf("Collecting 1 out of %zu steps\n", observableSkip); 
 
@@ -555,15 +559,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 // da_append(&trace.m0s, m0_est);
                 
                 double en = EnergyEstimator(path);
-                // if (en < -10) {
-                //     for (size_t tslice = 0; tslice < path.numTimeSlices; ++tslice) {
-                //         printf("x = %.3f y = %.3f z = %.3f\n", XC(path.beads, tslice), YC(path.beads, tslice), ZC(path.beads, tslice));
-                //     }
-
-                //     msleep(1000);
-                // } 
-                
                 da_append(&trace.energies, en);
+                
 
                 double necklace_size = compute_necklace_size(path); 
                 if (necklace_size > 0.2) {
@@ -573,8 +570,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 da_append(&trace.necklace_sizes, necklace_size);
             }
 
-            // gather_and_send_to_server(ctx, sockfd, trace.energies.items, &trace.energies.count, &packets_sent);
-            gather_and_send_to_server(ctx, sockfd, trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
+            gather_and_send_to_server(ctx, sockfd, "Energy", trace.energies.items, &trace.energies.count, &packets_sent);
+            // gather_and_send_to_server(ctx, sockfd, trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
         } 
     }
 

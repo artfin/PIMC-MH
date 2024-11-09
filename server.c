@@ -34,7 +34,6 @@ typedef struct {
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
 
-
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
 
@@ -103,18 +102,16 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
 {
     size_t nbins = h->n;
     assert(nbins > 1);
-    
     double xmin = h->range[0];
     double dx = h->range[1] - h->range[0];
     
-    double ymax = FLT_MIN; gsl_histogram_max_val(h);
-    
+    double ymax = FLT_MIN; // this the maximum "y" in the displayed region
     size_t displayed_nbins = 0;
 
     for (size_t i = 0; i < nbins; ++i) {
         double x = xmin + i*dx;
         if (x < display_xmin) continue;
-        if (x > display_xmax) break;
+        if (x + dx > display_xmax) break;
 
         double y = gsl_histogram_get(h, i);
         if (y > ymax) ymax = y;
@@ -126,11 +123,12 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
 
     double col_width = (displayed_nbins > 0) ? r.width / displayed_nbins : 0.0; 
 
+    size_t display_index = 0;
     for (size_t i = 0; i < nbins; ++i) 
     {
         double x = xmin + i*dx;
         if (x < display_xmin) continue;
-        if (x > display_xmax) break;
+        if (x + dx > display_xmax) break;
 
         double scale_height = 0.9;
 
@@ -142,13 +140,14 @@ void display_histogram(Rectangle r, gsl_histogram *h, double display_xmin, doubl
         }
 
         Rectangle col = {
-            .x = r.x + i*col_width,
+            .x = r.x + display_index*col_width,
             .y = r.y + r.height - scale_height*height, 
             .width = col_width,
             .height = scale_height*height, 
         };
 
         DrawRectangleLinesEx(col, 2.0, YELLOW);
+        display_index++;
     }
 }
 
@@ -196,6 +195,43 @@ void display_xlabels(Rectangle world, double display_xmin, double display_xmax)
     }
 }
 
+void show_grid(Rectangle world)
+{
+    size_t nlines = 10;
+    double DEFAULT_LW = 0.5;
+
+    for (size_t i = 0; i < nlines; ++i) 
+    {
+        double lw = (i == (nlines + 1)/2) ? 3*DEFAULT_LW : DEFAULT_LW;
+        Color color = (i == (nlines + 1)/2) ? GetColor(0xE1BFF264) : GetColor(0xC8C8C864); 
+
+        double dx = (float)i/nlines*world.width; 
+        DrawLineEx(
+            CLITERAL(Vector2){
+            .x = world.x + dx, 
+            .y = world.y,
+            },
+            CLITERAL(Vector2){
+            .x = world.x + dx, 
+            .y = world.y + world.height,
+            }, lw, color);
+        
+        double dy = (float)i/nlines*world.height; 
+        DrawLineEx(
+            CLITERAL(Vector2){
+            .x = world.x, 
+            .y = world.y + dy,
+            },
+            CLITERAL(Vector2){
+            .x = world.x + world.width, 
+            .y = world.y + dy,
+            }, lw, color);
+    }
+}
+
+#define MAX_TABS 3
+char tab_names[MAX_TABS][MAX_NAME_SIZE] = {0};
+
 int main()
 {
     initServer();
@@ -239,6 +275,7 @@ int main()
     GuiSetFont(font);
     font.baseSize = FONT_SIZE_LOAD;  
 
+
     bool ylogscale = false;  
     bool xadaptive = true;
 
@@ -248,6 +285,14 @@ int main()
     double var = 0.0;
     double stdev = 0.0;
 
+    // NOTE: 
+    // We have three sets of minimum/maximum values:
+    // 1) displayed region (display_xmin, display_xmax)
+    // 2) stored in histogram (hist_xmin, hist_xmax)
+    // 3) actual data (data_xmin, data_xmax)
+
+    double data_xmin = FLT_MAX;
+    double data_xmax = FLT_MIN;
     double display_xmin = h->range[0];
     double display_xmax = h->range[nbins];
 
@@ -259,12 +304,12 @@ int main()
         int screen_height = GetScreenHeight();
     
         nbins = h->n;
-        double xmin = h->range[0];
-        double xmax = h->range[nbins];
+        double hist_xmin = h->range[0];
+        double hist_xmax = h->range[nbins];
 
         if (xadaptive) {
-            display_xmin = xmin;
-            display_xmax = xmax;
+            display_xmin = hist_xmin;
+            display_xmax = hist_xmax;
         }
 
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
@@ -278,7 +323,12 @@ int main()
             .height = simul_sz
         };
         DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
-            
+
+        // int active_tab = 0; 
+        // GuiTabBar(CLITERAL(Rectangle) {
+        //     .x = 0.1*screen_width, .y = 0.1*screen_height, .width = simul_sz, .height = 50 
+        // }, (const char**) &tab_names, sizeof(tab_names)/sizeof(tab_names[0]), &active_tab);
+
    
         if (conn == NO_CONNECTION) {
             conn = acceptClientConnection(&sockfd);
@@ -315,6 +365,7 @@ int main()
             fcntl(sockfd, F_SETFL, flags); 
         } 
         
+        show_grid(world);
         display_histogram(world, h, display_xmin, display_xmax, ylogscale);
 
         if (samples_count > 0) { 
@@ -347,8 +398,8 @@ int main()
         // TODO: display boxes for ranges of histogram all the time
         // we could set INITIAL ranges and then modify the displayed range of the histogram
         if (conn == NO_CONNECTION) {
-            double lhs = xmin;
-            double rhs = xmax;
+            double lhs = hist_xmin;
+            double rhs = hist_xmax;
 
             if (get_histogram_ranges(contentRect, "Initial range:", &lhs, &rhs, true)) {
                 if (lhs < rhs) {
@@ -373,10 +424,6 @@ int main()
                     display_xmax = rhs; 
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff); 
-
-                    printf("------------\n");
-                    printf("display_xmin = %.3lf, display_xmax = %.3lf\n", display_xmin, display_xmax); 
-                    printf("------------\n"); 
                 } else {
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0xff0000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xff0000ff);  
@@ -405,10 +452,10 @@ int main()
             GuiLabel(contentRect, TextFormat("Packets: %zu", packets_count));
             contentRect.y += 0.9*FONT_SIZE;
            
-            GuiLabel(contentRect, TextFormat("Collected min: %.3e", xmin));
+            GuiLabel(contentRect, TextFormat("Data min: %.3e", data_xmin));
             contentRect.y += 0.9*FONT_SIZE;
 
-            GuiLabel(contentRect, TextFormat("Collected max: %.3e", xmax));
+            GuiLabel(contentRect, TextFormat("Data max: %.3e", data_xmax));
             contentRect.y += 0.9*FONT_SIZE;
 
             GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
@@ -436,16 +483,20 @@ int main()
         EndDrawing();
       
         if (conn == CONNECTION_ESTABLISHED) {
-            SocketOpResult r; 
-            r = recvFloat64Array(sockfd, &tr.items, &tr.count);
-            // r = recvFloat64Array(sockfd, &necklace_sizes.items, &necklace_sizes.count);
+            SocketOpResult r;
+
+            char *name = NULL;
+            r = recvNamedFloat64Array(sockfd, &name, &tr.items, &tr.count);
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");
-                conn = DISCONNECTED; 
-            }
+                conn = DISCONNECTED;
+                continue; 
+            } else if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive
+                // NOTE: "-1" is added so that strncpy could add a null-terminator..   
+                strncpy((char*) tab_names[0], name, MAX_NAME_SIZE - 1); 
+                printf("name: %s\n", tab_names[0]);
 
-            if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive
                 printf("extending histogram with %zu elements\n", tr.count); 
 
                 double packet_mean = 0.0;
@@ -462,6 +513,9 @@ int main()
 
                     gsl_histogram_increment(h, tr.items[i]);
                     packet_mean += tr.items[i];
+
+                    if (tr.items[i] > data_xmax) data_xmax = tr.items[i];
+                    if (tr.items[i] < data_xmin) data_xmin = tr.items[i];
                 }
                 packet_mean /= tr.count;
 
