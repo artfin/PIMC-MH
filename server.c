@@ -26,6 +26,8 @@ int FONT_SIZE = 24;
 static Arena arena = {0}; 
 static Arena arena_str = {0};
 
+// #define SHOW_NUMBERED_HISTOGRAM_COLUMNS
+
 typedef struct {
     double *items;
     size_t count;
@@ -73,15 +75,8 @@ static size_t TAB_COUNT = 0;
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
 
-
 #define return_defer(value) do { result = (value); goto defer; } while (0)
 
-// TODO: Send a map with a reference value with respect to which we display the difference
-
-// TODO: Customize the received values from client: we should receive an array of AVERAGES over N values, not raw data 
-//       - averageWindow is now read from window
-//       - then we have to send it over to client
-// TODO: load the default values for histogram ranges from the configuration file
 
 gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h);
 gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h);
@@ -159,9 +154,6 @@ void display_histogram(Rectangle r, gsl_histogram *h, Range display_range, bool 
 
     if (ylogscale) ymax = log(ymax);
 
-    double col_width = (displayed_nbins > 0) ? r.width / displayed_nbins : 0.0; 
-
-    size_t display_index = 0;
     for (size_t i = 0; i < nbins; ++i) 
     {
         double x = xmin + i*dx;
@@ -178,19 +170,29 @@ void display_histogram(Rectangle r, gsl_histogram *h, Range display_range, bool 
         }
 
         Rectangle col = {
-            .x = r.x + display_index*col_width,
-            .y = r.y + r.height - scale_height*height, 
-            .width = col_width,
-            .height = scale_height*height, 
+            .x = r.x + (x - display_range.min) / (display_range.max - display_range.min) * r.width,
+            .y = (r.y + r.height) - scale_height*height,
+            .width = dx/(display_range.max - display_range.min) * r.width, 
+            .height = scale_height*height,
         };
-
         DrawRectangleLinesEx(col, 2.0, YELLOW);
-        display_index++;
+
+#ifdef SHOW_NUMBERED_HISTOGRAM_COLUMNS
+        const char *buffer = TextFormat("%d", i);
+        Vector2 text_len = MeasureTextEx(font, buffer, FONT_SIZE, 0);
+        Vector2 text_pos = {
+            .x = r.x + (x - display_range.min) / (display_range.max - display_range.min) * r.width + dx/(display_range.max - display_range.min) * r.width/2.0 - 0.25*text_len.x, 
+            .y = (r.y + r.height) - scale_height*height - text_len.y - 10,
+        };
+        DrawTextEx(font, buffer, text_pos, FONT_SIZE, 0, RED);
+#endif // SHOW_NUMBERED_HISTOGRAM_COLUMNS
     }
 }
 
 void display_mean(Rectangle world, double mean, Range display_range)
 {
+    if ((mean > display_range.max) || (mean < display_range.min)) return;
+
     DrawLineEx(
         CLITERAL(Vector2){
         .x = world.x + (mean - display_range.min)/(display_range.max - display_range.min)*world.width, 
@@ -281,6 +283,8 @@ Tab* tab_alloc(const char *name) {
 
     size_t nbins = 20;
     tab->h = gsl_histogram_alloc(nbins);
+    // these are default values which will be set based on the values
+    // in the first received data packet
     gsl_histogram_set_ranges_uniform(tab->h, -0.5, 0.5);
     
     tab->data_range = (Range) { 
@@ -305,6 +309,9 @@ Tab* tab_alloc(const char *name) {
     return tab;
 }
 
+void tab_free(Tab *tab) {
+    gsl_histogram_free(tab->h);
+}
 
 void add_packet_to_tab(Tab *tab, Trace tr)
 {
@@ -351,13 +358,6 @@ void add_packet_to_tab(Tab *tab, Trace tr)
     tab->packets_count++;
 }
 
-
-void test(const char** text, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        printf("text[%zu] = %s\n", i, text[i]);
-    }
-}
-
 int main()
 {
     initServer();
@@ -374,7 +374,6 @@ int main()
     int nclients;
     
     Trace tr = {0};
-    // Trace necklace_sizes = {0};
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
@@ -435,16 +434,16 @@ int main()
         };
         DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
 
-        Rectangle bar = CLITERAL(Rectangle) {
+        Rectangle tab_bar = CLITERAL(Rectangle) {
             .x = 0.02*screen_width, 
             .y = 0.02*screen_height, 
-            .width = simul_sz, 
-            .height = 50 
+            .width = simul_sz/2, 
+            .height = 0.07*screen_height, 
         };
    
         // GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL, 0xff0000ff);
         int cursor;
-        GuiTabBar(bar, (const char**) ptab_names, TAB_COUNT, &cursor);
+        GuiTabBar(tab_bar, (const char**) ptab_names, TAB_COUNT, &cursor);
         active_tab = &TABS[cursor]; 
    
         if (conn == NO_CONNECTION) {
@@ -522,9 +521,6 @@ int main()
             contentRect.y += FONT_SIZE + margin;
         }
 
-
-        // TODO: display boxes for ranges of histogram all the time
-        // we could set INITIAL ranges and then modify the displayed range of the histogram
         if (conn == NO_CONNECTION) {
             double lhs = active_tab->hist_range.min;
             double rhs = active_tab->hist_range.max;
@@ -660,8 +656,10 @@ defer:
     arena_free(&arena);
     arena_free(&arena_str);
 
-    // TODO: free tabs
-    //gsl_histogram_free(h);
+    for (size_t i = 0; i < TAB_COUNT; ++i) {
+        Tab *tab = &TABS[i];
+        tab_free(tab);
+    }
 
     return result;
 }
