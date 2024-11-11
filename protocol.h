@@ -95,9 +95,6 @@ typedef struct {
 // void serialize_message(Message *message, uint32_t *bytes_length, uint8_t **bytes); // TODO: what is the approach here? 
 Message* deserialize_message(MessageKind kind, uint32_t bytes_length, uint8_t *bytes);
 
-SocketOpResult sendNamedFloat64Array(int sockfd, const char *name, double *data, size_t count);
-SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, size_t *count);
-
 SocketOpResult sendFloat64Array(int sockfd, double *data, size_t count);
 SocketOpResult recvFloat64Array(int sockfd, double **data, size_t *count);
 
@@ -109,6 +106,13 @@ SocketOpResult recvFloat64(int sockfd, double *value);
 
 SocketOpResult sendFixedLengthString(int sockfd, const char *buffer);
 SocketOpResult recvFixedLengthString(int sockfd, char **buffer, size_t *count);
+
+SocketOpResult sendNamedFloat64Array(int sockfd, const char *name, double *data, size_t count);
+SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, size_t *count);
+
+SocketOpResult sendNamedFloat64(int sockfd, const char *name, double value);
+SocketOpResult recvNamedFloat64(int sockfd, char **name, double *value);
+
 
 #ifdef PROTOCOL_IMPLEMENTATION 
 
@@ -478,11 +482,54 @@ SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, siz
     *data = bytes + sizeof(uint32_t) + sizeof(MessageKind) + MAX_NAME_SIZE*sizeof(char);
 
     if (_verbose) {
-        printf("(recvNamedFloat64Array): message contents = [name = %.*s, %u bytes, %zu float64s] %.3lf ...\n", MAX_NAME_SIZE, *name, sz, *count, (*data)[0]);
+        printf("(recvNamedFloat64Array): message contents = {[name] %.*s, %u bytes, %zu float64s] %.3lf ...\n", MAX_NAME_SIZE, *name, sz, *count, (*data)[0]);
     }
     
     return SOCKOP_SUCCESS; 
 } 
+
+SocketOpResult sendNamedFloat64(int sockfd, const char *name, double value)
+{
+    uint32_t payload_length = MAX_NAME_SIZE*sizeof(char) + sizeof(double);
+
+    Message *message = (Message*) arena_alloc(&arena, sizeof(message) + payload_length);
+    message->size = sizeof(message) + payload_length;
+    message->kind = MSG_NAMED_FLOAT64;
+
+    assert(strlen(name) < MAX_NAME_SIZE);
+    memcpy(message->payload, name, MAX_NAME_SIZE*sizeof(char));
+    memcpy(message->payload + MAX_NAME_SIZE*sizeof(char), &value, sizeof(double));
+
+    return w_send(sockfd, message, message->size); 
+}
+
+SocketOpResult recvNamedFloat64(int sockfd, char **name, double *value)
+{
+    SocketOpResult res;
+    uint32_t sz;
+
+    res = w_recv(sockfd, &sz, sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res;
+
+    void *bytes = arena_alloc(&arena, sz);
+    memset(bytes, 0, sz);
+    memcpy(bytes, &sz, sizeof(uint32_t));
+
+    res = w_recv(sockfd, bytes + sizeof(uint32_t), sz - sizeof(uint32_t));
+    if (res != SOCKOP_SUCCESS) return res;
+
+    Message *msg = (Message*) bytes;
+    assert(msg->kind == MSG_NAMED_FLOAT64);
+
+    *name = bytes + sizeof(uint32_t) + sizeof(MessageKind);
+    memcpy(value, msg->payload + MAX_NAME_SIZE*sizeof(char), sizeof(double));
+
+    if (_verbose) {
+        printf("(recvNamedFloat64): message contents = {[name] %.*s, [double] %.3lf}\n", MAX_NAME_SIZE, *name, *value);
+    } 
+
+    return SOCKOP_SUCCESS;
+}
 
 #endif // PROTOCOL_IMPLEMENTATION 
 

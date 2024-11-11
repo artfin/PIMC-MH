@@ -40,13 +40,17 @@ typedef struct {
 #define PROTOCOL_IMPLEMENTATION
 #include "protocol.h"
 
-
 typedef struct {
     char name[MAX_NAME_SIZE];
     
     gsl_histogram *h;
     size_t samples_count; 
     
+    // NOTE: 
+    // We have three sets of minimum/maximum values:
+    // 1) displayed region (display_xmin, display_xmax)
+    // 2) stored in histogram (hist_xmin, hist_xmax)
+    // 3) actual data (data_xmin, data_xmax)
     Range data_range;
     Range display_range;
     Range hist_range;
@@ -261,7 +265,7 @@ void show_grid(Rectangle world)
     }
 }
 
-char **convert_to_char_ptr(char (*names)[MAX_NAME_SIZE], size_t size);
+char **convert_char2d_to_ptr(char (*names)[MAX_NAME_SIZE], size_t size);
 
 Tab* tab_alloc(const char *name) {
     assert(TAB_COUNT < MAX_TABS);
@@ -294,7 +298,7 @@ Tab* tab_alloc(const char *name) {
 
     TAB_COUNT++;
 
-    ptab_names = convert_to_char_ptr(tab_names, TAB_COUNT);
+    ptab_names = convert_char2d_to_ptr(tab_names, TAB_COUNT);
 
     return tab;
 }
@@ -365,7 +369,6 @@ int main()
     Trace tr = {0};
     // Trace necklace_sizes = {0};
 
-
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     
@@ -388,13 +391,16 @@ int main()
     SetTargetFPS(60);
 
 
-    // NOTE: 
-    // We have three sets of minimum/maximum values:
-    // 1) displayed region (display_xmin, display_xmax)
-    // 2) stored in histogram (hist_xmin, hist_xmax)
-    // 3) actual data (data_xmin, data_xmax)
-
-    Tab *active_tab = tab_alloc("default");
+    strcpy(tab_names[0], "Necklace size");
+    strcpy(tab_names[1], "Energy");
+    for (size_t i = 0; i < MAX_TABS; ++i) {
+        char *name = tab_names[i];
+        if (strlen(name) > 0) {
+            tab_alloc(name);
+        }
+    }
+     
+    Tab *active_tab = &TABS[0]; 
 
     while (!WindowShouldClose()) {
         BeginDrawing();
@@ -430,14 +436,10 @@ int main()
             .height = 50 
         };
    
-        GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL, 0xff0000ff);
-
-        // test((const char**) convert_to_char_ptr(tab_names, TAB_COUNT), TAB_COUNT); 
-            
+        // GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL, 0xff0000ff);
         int cursor;
         GuiTabBar(bar, (const char**) ptab_names, TAB_COUNT, &cursor);
         active_tab = &TABS[cursor]; 
-
    
         if (conn == NO_CONNECTION) {
             conn = acceptClientConnection(&sockfd);
@@ -459,7 +461,9 @@ int main()
             r = recvInt32(sockfd, &nclients);
             assert_sockop_result(r); 
     
-            r = recvFloat64(sockfd, &refval); 
+            char *name = NULL;
+            r = recvNamedFloat64(sockfd, &name, &refval);
+             
             assert_sockop_result(r); 
                 
             sendInt32(sockfd, blockSize);
@@ -468,7 +472,6 @@ int main()
   
             // The parameters are exchanged in the BLOCKING mode of the socket
             // and only then we set the socket in the non-blocking mode
-                      
             int flags = fcntl(sockfd, F_GETFL, 0);
             flags |= O_NONBLOCK;
             fcntl(sockfd, F_SETFL, flags); 
@@ -607,8 +610,8 @@ int main()
                 // printf("name: %s\n", tab_names[0]);
 
                 Tab *tab = NULL;
-                
-                if (TAB_COUNT == 1) {
+               
+                if ((TAB_COUNT == 1) && (strcmp(active_tab->name, "default") == 0)) {
                     tab = active_tab;
                     strcpy(tab->name, packet_name);
                     strcpy(tab_names[0], packet_name);
@@ -695,7 +698,7 @@ gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h)
     return new_h;
 }
 
-char **convert_to_char_ptr(char (*names)[MAX_NAME_SIZE], size_t size) {
+char **convert_char2d_to_ptr(char (*names)[MAX_NAME_SIZE], size_t size) {
     char **p = (char **) arena_alloc(&arena_str, size * sizeof(char *));
     for (size_t i = 0; i < size; i++) {
         p[i] = names[i];

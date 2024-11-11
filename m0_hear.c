@@ -570,8 +570,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 da_append(&trace.necklace_sizes, necklace_size);
             }
 
-            // gather_and_send_to_server(ctx, sockfd, "Energy", trace.energies.items, &trace.energies.count, &packets_sent);
             gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
+            gather_and_send_to_server(ctx, sockfd, "Energy",        trace.energies.items, &trace.energies.count, &packets_sent);
         } 
     }
 
@@ -760,7 +760,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendFloat64(sockfd, path.beta);
             sendInt32(sockfd, (int) path.numTimeSlices);
             sendInt32(sockfd, ctx.size);
-            sendFloat64(sockfd, refVal);
+            sendNamedFloat64(sockfd, "Energy", refVal);
             recvInt32(sockfd, &blockSize);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
