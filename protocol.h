@@ -25,7 +25,7 @@
 #define PORT 6969 
 #define MAX_CONNECTIONS 5
 
-#define MAX_NAME_SIZE 20
+#define MAX_NAME_SIZE 25
 
 typedef enum {
     SOCKOP_SUCCESS = 0,

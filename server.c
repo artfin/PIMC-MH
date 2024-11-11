@@ -54,7 +54,8 @@ typedef struct {
     Range data_range;
     Range display_range;
     Range hist_range;
-    
+  
+    double refval;  
     double mean;
     double var;
     double stdev;
@@ -371,8 +372,6 @@ int main()
     double beta, T;
     int numTimeSlices;
     int nclients;
-    double refval;
-    int blockSize = 1;
     
     Trace tr = {0};
     // Trace necklace_sizes = {0};
@@ -397,7 +396,6 @@ int main()
     bool xadaptive = true;
 
     SetTargetFPS(60);
-
 
     strcpy(tab_names[0], "Necklace size");
     strcpy(tab_names[1], "Energy");
@@ -468,14 +466,24 @@ int main()
             
             r = recvInt32(sockfd, &nclients);
             assert_sockop_result(r); 
-    
-            char *name = NULL;
-            r = recvNamedFloat64(sockfd, &name, &refval);
-             
-            assert_sockop_result(r); 
-                
-            sendInt32(sockfd, blockSize);
+  
+            // TODO: can we make this more flexible? 
+            // can we communicate the reference value with the data packet?
+            for (size_t i = 0; i < TAB_COUNT; ++i) {
+                Tab *tab = &TABS[i];
 
+                char *name = NULL;
+                double refval;
+                r = recvNamedFloat64(sockfd, &name, &refval);
+                assert_sockop_result(r); 
+                
+                if (strcmp(tab->name, name) != 0) {
+                    printf("ERROR: Expected '%s' but got '%s'\n", tab->name, name);
+                    return_defer(1); 
+                }
+                tab->refval = refval;
+            }
+                
             parameters_exchanged = true;
   
             // The parameters are exchanged in the BLOCKING mode of the socket
@@ -588,14 +596,14 @@ int main()
             GuiLabel(contentRect, TextFormat("Error estimate: %.5e", exp_error));
             contentRect.y += 0.9*FONT_SIZE;
             
-            GuiLabel(contentRect, TextFormat("Reference: %.5e", refval));
+            GuiLabel(contentRect, TextFormat("Reference: %.5e", active_tab->refval));
             contentRect.y += 0.9*FONT_SIZE;
             
-            double actual_error = active_tab->mean - refval; 
+            double actual_error = active_tab->mean - active_tab->refval; 
             GuiLabel(contentRect, TextFormat("Actual error: %.5e", actual_error));
             contentRect.y += 0.9*FONT_SIZE;
             
-            double rel_error = fabs(actual_error) / refval;
+            double rel_error = fabs(actual_error) / active_tab->refval;
             GuiLabel(contentRect, TextFormat("Relative error: %.3f%%", rel_error*100.0));
             contentRect.y += 0.9*FONT_SIZE;
         }

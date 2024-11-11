@@ -726,7 +726,9 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
-    
+
+    double necklace_size_refVal = beta/12.0/mu; /* * hbar^2 */  
+
     // double coeff = pow(4.0 * M_PI * lam * path.tau, -1.5);
 
     // Source: M0 at 295K from diploma
@@ -739,8 +741,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     // double refVal = 2.18387e-07; // mean(mu^2) obtained with HEP [400K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
 
     // double refVal = 7.11076e-04; // mean(E) obtained with HEP [300 K] 
-    double refVal = -9.05971e-03; // mean(E) for MORSE 
-    int blockSize = 1; // TODO: ignore for now
+    double energy_refVal = -9.05971e-03; // mean(E) for MORSE 
 
     if (ctx.rank == 0) {
         printf("Simulation parameters:\n");
@@ -760,8 +761,8 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendFloat64(sockfd, path.beta);
             sendInt32(sockfd, (int) path.numTimeSlices);
             sendInt32(sockfd, ctx.size);
-            sendNamedFloat64(sockfd, "Energy", refVal);
-            recvInt32(sockfd, &blockSize);
+            sendNamedFloat64(sockfd, "Necklace size", necklace_size_refVal);
+            sendNamedFloat64(sockfd, "Energy", energy_refVal);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
