@@ -84,6 +84,7 @@ static size_t TAB_COUNT = 0;
 
 gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h);
 gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h);
+void set_histogram_ranges_from_packet(gsl_histogram *h, Trace packet);
 
 bool get_histogram_ranges(Rectangle contentRect, const char *description, double *lhs, double *rhs, bool editMode)
 {
@@ -303,9 +304,16 @@ Tab* tab_alloc(const char *name) {
     return tab;
 }
 
+
 void add_packet_to_tab(Tab *tab, Trace tr)
 {
-    printf("extending histogram with %zu elements\n", tr.count); 
+    printf("INFO: Extending histogram %s with %zu elements\n", tab->name, tr.count); 
+
+    if (tab->packets_count == 0) {
+        set_histogram_ranges_from_packet(tab->h, tr);
+        printf("INFO: Setting initial range for histogram %s to [%.5lf...%.5lf]\n", 
+                tab->name, tab->h->range[0], tab->h->range[tab->h->n]); 
+    }
 
     double packet_mean = 0.0;
     for (size_t i = 0; i < tr.count; ++i) {
@@ -696,6 +704,19 @@ gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h)
     gsl_histogram_free(h);
 
     return new_h;
+}
+
+void set_histogram_ranges_from_packet(gsl_histogram *h, Trace packet)
+{
+    double packet_min = FLT_MAX;
+    double packet_max = FLT_MIN;
+
+    for (size_t i = 0; i < packet.count; ++i) {
+        if (packet.items[i] < packet_min) packet_min = packet.items[i];
+        if (packet.items[i] > packet_max) packet_max = packet.items[i];
+    } 
+
+    gsl_histogram_set_ranges_uniform(h, packet_min, packet_max);
 }
 
 char **convert_char2d_to_ptr(char (*names)[MAX_NAME_SIZE], size_t size) {
