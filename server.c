@@ -9,6 +9,7 @@
 
 #define RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT 32 
 #define RAYGUI_IMPLEMENTATION
+// #define RAYGUI_NO_ICONS
 #include "raygui.h"
 #include "styles/dark/style_dark.h"
 
@@ -22,7 +23,8 @@ int FONT_SIZE = 24;
 
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
-static Arena arena = {0};
+static Arena arena = {0}; 
+static Arena arena_str = {0};
 
 typedef struct {
     double *items;
@@ -35,12 +37,37 @@ typedef struct {
     double max;
 } Range; 
 
+#define PROTOCOL_IMPLEMENTATION
+#include "protocol.h"
+
+
+typedef struct {
+    char name[MAX_NAME_SIZE];
+    
+    gsl_histogram *h;
+    size_t samples_count; 
+    
+    Range data_range;
+    Range display_range;
+    Range hist_range;
+    
+    double mean;
+    double var;
+    double stdev;
+
+    size_t packets_count;
+} Tab;
+
+#define MAX_TABS 3
+static char tab_names[MAX_TABS][MAX_NAME_SIZE] = {0};
+static char **ptab_names = NULL; // different representation of tab_names for GuiTabBar
+static Tab TABS[MAX_TABS] = {0};
+static size_t TAB_COUNT = 0;
+
 #define Hartree           4.3597447222071e-18 // SI: J 
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
 
-#define PROTOCOL_IMPLEMENTATION
-#include "protocol.h"
 
 #define return_defer(value) do { result = (value); goto defer; } while (0)
 
@@ -234,9 +261,89 @@ void show_grid(Rectangle world)
     }
 }
 
-#define MAX_TABS 3
-char tab_names[MAX_TABS][MAX_NAME_SIZE] = {0};
+char **convert_to_char_ptr(char (*names)[MAX_NAME_SIZE], size_t size);
 
+Tab* tab_alloc(const char *name) {
+    assert(TAB_COUNT < MAX_TABS);
+   
+    printf("INFO: Creating tab (%zu) with name = %s\n", TAB_COUNT, name);
+    Tab *tab = &TABS[TAB_COUNT];
+
+    assert(strlen(name) < MAX_NAME_SIZE); 
+    strcpy(tab->name, name);
+    strcpy(tab_names[TAB_COUNT], name);
+
+    size_t nbins = 20;
+    tab->h = gsl_histogram_alloc(nbins);
+    gsl_histogram_set_ranges_uniform(tab->h, -0.5, 0.5);
+    
+    tab->data_range = (Range) { 
+        .min = FLT_MAX, 
+        .max = FLT_MIN 
+    };
+    
+    tab->display_range = (Range) { 
+        .min = tab->h->range[0],
+        .max = tab->h->range[nbins]
+    };
+
+    tab->hist_range = (Range) {
+        .min = tab->h->range[0],
+        .max = tab->h->range[nbins],
+    };
+
+    TAB_COUNT++;
+
+    ptab_names = convert_to_char_ptr(tab_names, TAB_COUNT);
+
+    return tab;
+}
+
+void add_packet_to_tab(Tab *tab, Trace tr)
+{
+    printf("extending histogram with %zu elements\n", tr.count); 
+
+    double packet_mean = 0.0;
+    for (size_t i = 0; i < tr.count; ++i) {
+        while (tr.items[i] < tab->h->range[0]) {
+            tab->h = gsl_histogram_extend_left(tab->h);
+            printf("extending histogram: %.5f -- %.5f\n", tab->h->range[0], tab->h->range[tab->h->n]);
+        }
+
+        while (tr.items[i] > tab->h->range[tab->h->n]) {
+            tab->h = gsl_histogram_extend_right(tab->h);
+            printf("extending histogram: %.5f -- %.5f\n", tab->h->range[0], tab->h->range[tab->h->n]);
+        }
+
+        gsl_histogram_increment(tab->h, tr.items[i]);
+        packet_mean += tr.items[i];
+
+        if (tr.items[i] > tab->data_range.max) tab->data_range.max = tr.items[i];
+        if (tr.items[i] < tab->data_range.min) tab->data_range.min = tr.items[i];
+    }
+    packet_mean /= tr.count;
+
+    double packet_var  = 0.0;
+    for (size_t i = 0; i < tr.count; ++i) {
+        packet_var += (tr.items[i] - packet_mean)*(tr.items[i] - packet_mean);
+    }
+    packet_var /= (tr.count - 1);
+
+    tab->var = ((tab->samples_count-1)*tab->var + (tr.count-1)*packet_var) / (tab->samples_count + tr.count-1) + 
+                 tab->samples_count*tr.count*(tab->mean - packet_mean)*(tab->mean - packet_mean)/(tab->samples_count + tr.count)/(tab->samples_count + tr.count - 1);
+    tab->mean = (tab->mean*tab->samples_count + tr.count*packet_mean) / (tab->samples_count + tr.count);
+    tab->stdev = sqrt(tab->var);
+
+    tab->samples_count += tr.count;
+    tab->packets_count++;
+}
+
+
+void test(const char** text, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        printf("text[%zu] = %s\n", i, text[i]);
+    }
+}
 
 int main()
 {
@@ -258,12 +365,6 @@ int main()
     Trace tr = {0};
     // Trace necklace_sizes = {0};
 
-    size_t nbins = 20;
-    gsl_histogram *h = gsl_histogram_alloc(nbins);
-    gsl_histogram_set_ranges_uniform(h, -0.5, 0.5);
-   
-    size_t samples_count = 0; 
-    size_t packets_count = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_MSAA_4X_HINT);
@@ -281,15 +382,11 @@ int main()
     GuiSetFont(font);
     font.baseSize = FONT_SIZE_LOAD;  
 
-
     bool ylogscale = false;  
     bool xadaptive = true;
 
     SetTargetFPS(60);
 
-    double mean = 0.0;
-    double var = 0.0;
-    double stdev = 0.0;
 
     // NOTE: 
     // We have three sets of minimum/maximum values:
@@ -297,15 +394,7 @@ int main()
     // 2) stored in histogram (hist_xmin, hist_xmax)
     // 3) actual data (data_xmin, data_xmax)
 
-    Range data_range = { 
-        .min = FLT_MAX, 
-        .max = FLT_MIN 
-    };
-
-    Range display_range = { 
-        .min = h->range[0],
-        .max = h->range[nbins]
-    };
+    Tab *active_tab = tab_alloc("default");
 
     while (!WindowShouldClose()) {
         BeginDrawing();
@@ -313,16 +402,13 @@ int main()
         
         int screen_width = GetScreenWidth();
         int screen_height = GetScreenHeight();
-    
-        nbins = h->n;
-        Range hist_range = {
-            .min = h->range[0],
-            .max = h->range[nbins]
-        };
 
+        active_tab->hist_range.min = active_tab->h->range[0];
+        active_tab->hist_range.max = active_tab->h->range[active_tab->h->n]; 
+        
         if (xadaptive) {
-            display_range.min = hist_range.min;
-            display_range.max = hist_range.max;
+            active_tab->display_range.min = active_tab->hist_range.min;
+            active_tab->display_range.max = active_tab->hist_range.max;
         }
 
         int simul_sz = (int) (0.8 * fminf(screen_width, screen_height));
@@ -337,10 +423,20 @@ int main()
         };
         DrawRectangleLinesEx(world, 3.0, LIGHTGRAY);
 
-        // int active_tab = 0; 
-        // GuiTabBar(CLITERAL(Rectangle) {
-        //     .x = 0.1*screen_width, .y = 0.1*screen_height, .width = simul_sz, .height = 50 
-        // }, (const char**) &tab_names, sizeof(tab_names)/sizeof(tab_names[0]), &active_tab);
+        Rectangle bar = CLITERAL(Rectangle) {
+            .x = 0.02*screen_width, 
+            .y = 0.02*screen_height, 
+            .width = simul_sz, 
+            .height = 50 
+        };
+   
+        GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL, 0xff0000ff);
+
+        // test((const char**) convert_to_char_ptr(tab_names, TAB_COUNT), TAB_COUNT); 
+            
+        int cursor;
+        GuiTabBar(bar, (const char**) ptab_names, TAB_COUNT, &cursor);
+        active_tab = &TABS[cursor]; 
 
    
         if (conn == NO_CONNECTION) {
@@ -379,13 +475,13 @@ int main()
         } 
         
         show_grid(world);
-        display_histogram(world, h, display_range, ylogscale);
+        display_histogram(world, active_tab->h, active_tab->display_range, ylogscale);
 
-        if (samples_count > 0) { 
-            display_mean(world, mean, display_range);      
+        if (active_tab->samples_count > 0) { 
+            display_mean(world, active_tab->mean, active_tab->display_range);      
         }
 
-        display_xlabels(world, display_range);
+        display_xlabels(world, active_tab->display_range);
 
        
         GuiWindowBox(settingsRect, "Settings");
@@ -411,14 +507,14 @@ int main()
         // TODO: display boxes for ranges of histogram all the time
         // we could set INITIAL ranges and then modify the displayed range of the histogram
         if (conn == NO_CONNECTION) {
-            double lhs = hist_range.min;
-            double rhs = hist_range.max;
+            double lhs = active_tab->hist_range.min;
+            double rhs = active_tab->hist_range.max;
 
             if (get_histogram_ranges(contentRect, "Initial range:", &lhs, &rhs, true)) {
                 if (lhs < rhs) {
-                    gsl_histogram_set_ranges_uniform(h, lhs, rhs);
-                    display_range.min = lhs;
-                    display_range.max = rhs; 
+                    gsl_histogram_set_ranges_uniform(active_tab->h, lhs, rhs);
+                    active_tab->display_range.min = lhs;
+                    active_tab->display_range.max = rhs; 
 
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff);  
@@ -428,13 +524,13 @@ int main()
                 }
             }
         } else if (conn == CONNECTION_ESTABLISHED) {
-            double lhs = display_range.min;
-            double rhs = display_range.max;
+            double lhs = active_tab->display_range.min;
+            double rhs = active_tab->display_range.max;
 
             if (get_histogram_ranges(contentRect, "Display range:", &lhs, &rhs, !xadaptive)) {
                 if (lhs < rhs) {
-                    display_range.min = lhs;
-                    display_range.max = rhs; 
+                    active_tab->display_range.min = lhs;
+                    active_tab->display_range.max = rhs; 
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, 0x000000ff);
                     GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, 0xe1e1e1ff); 
                 } else {
@@ -459,32 +555,32 @@ int main()
             GuiLabel(contentRect, TextFormat("time slices: %d", numTimeSlices));
             contentRect.y += 0.9*FONT_SIZE;
             
-            GuiLabel(contentRect, TextFormat("Samples: %zu", samples_count));
+            GuiLabel(contentRect, TextFormat("Samples: %zu", active_tab->samples_count));
             contentRect.y += 0.9*FONT_SIZE;
             
-            GuiLabel(contentRect, TextFormat("Packets: %zu", packets_count));
+            GuiLabel(contentRect, TextFormat("Packets: %zu", active_tab->packets_count));
             contentRect.y += 0.9*FONT_SIZE;
            
-            GuiLabel(contentRect, TextFormat("Data min: %.3e", data_range.min));
+            GuiLabel(contentRect, TextFormat("Data min: %.3e", active_tab->data_range.min));
             contentRect.y += 0.9*FONT_SIZE;
 
-            GuiLabel(contentRect, TextFormat("Data max: %.3e", data_range.max));
+            GuiLabel(contentRect, TextFormat("Data max: %.3e", active_tab->data_range.max));
             contentRect.y += 0.9*FONT_SIZE;
 
-            GuiLabel(contentRect, TextFormat("Number of bins: %zu", nbins));
+            GuiLabel(contentRect, TextFormat("Number of bins: %zu", active_tab->h->n));
             contentRect.y += 0.9*FONT_SIZE;
             
-            GuiLabel(contentRect, TextFormat("Mean: %.5e", mean));
+            GuiLabel(contentRect, TextFormat("Mean: %.5e", active_tab->mean));
             contentRect.y += 0.9*FONT_SIZE;
             
-            double exp_error = stdev/sqrt(samples_count);
+            double exp_error = active_tab->stdev/sqrt(active_tab->samples_count);
             GuiLabel(contentRect, TextFormat("Error estimate: %.5e", exp_error));
             contentRect.y += 0.9*FONT_SIZE;
             
             GuiLabel(contentRect, TextFormat("Reference: %.5e", refval));
             contentRect.y += 0.9*FONT_SIZE;
             
-            double actual_error = mean - refval; 
+            double actual_error = active_tab->mean - refval; 
             GuiLabel(contentRect, TextFormat("Actual error: %.5e", actual_error));
             contentRect.y += 0.9*FONT_SIZE;
             
@@ -498,8 +594,8 @@ int main()
         if (conn == CONNECTION_ESTABLISHED) {
             SocketOpResult r;
 
-            char *name = NULL;
-            r = recvNamedFloat64Array(sockfd, &name, &tr.items, &tr.count);
+            char *packet_name = NULL;
+            r = recvNamedFloat64Array(sockfd, &packet_name, &tr.items, &tr.count);
 
             if (r == SOCKOP_DISCONNECTED) {
                 fprintf(stderr, "Socket closed\n");
@@ -507,44 +603,28 @@ int main()
                 continue; 
             } else if (r == SOCKOP_SUCCESS) { // otherwise we are waiting for the data packet to arrive
                 // NOTE: "-1" is added so that strncpy could add a null-terminator..   
-                strncpy((char*) tab_names[0], name, MAX_NAME_SIZE - 1); 
-                printf("name: %s\n", tab_names[0]);
+                // strncpy((char*) tab_names[0], name, MAX_NAME_SIZE - 1); 
+                // printf("name: %s\n", tab_names[0]);
 
-                printf("extending histogram with %zu elements\n", tr.count); 
-
-                double packet_mean = 0.0;
-                for (size_t i = 0; i < tr.count; ++i) {
-                    while (tr.items[i] < h->range[0]) {
-                        h = gsl_histogram_extend_left(h);
-                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                Tab *tab = NULL;
+                
+                if (TAB_COUNT == 1) {
+                    tab = active_tab;
+                    strcpy(tab->name, packet_name);
+                    strcpy(tab_names[0], packet_name);
+                } else {
+                    for (size_t i = 0; i < MAX_TABS; ++i) {
+                        if (strcmp(TABS[i].name, packet_name) == 0) {
+                            tab = &TABS[i];
+                        }
                     }
 
-                    while (tr.items[i] > h->range[h->n]) {
-                        h = gsl_histogram_extend_right(h);
-                        printf("extending histogram: %.5f -- %.5f\n", h->range[0], h->range[h->n]);
+                    if (tab == NULL) {
+                        tab = tab_alloc(packet_name);
                     }
-
-                    gsl_histogram_increment(h, tr.items[i]);
-                    packet_mean += tr.items[i];
-
-                    if (tr.items[i] > data_range.max) data_range.max = tr.items[i];
-                    if (tr.items[i] < data_range.min) data_range.min = tr.items[i];
                 }
-                packet_mean /= tr.count;
 
-                double packet_var  = 0.0;
-                for (size_t i = 0; i < tr.count; ++i) {
-                    packet_var += (tr.items[i] - packet_mean)*(tr.items[i] - packet_mean);
-                }
-                packet_var /= (tr.count - 1);
-
-                assert(blockSize == 1); 
-                var = ((samples_count-1)*var + (tr.count-1)*packet_var) / (samples_count+tr.count-1) + samples_count*tr.count*(mean - packet_mean)*(mean - packet_mean)/(samples_count+tr.count)/(samples_count+tr.count - 1);
-                mean = (mean*samples_count + tr.count*packet_mean) / (samples_count + tr.count);
-                stdev = sqrt(var);
-
-                samples_count += tr.count;
-                packets_count++;
+                add_packet_to_tab(tab, tr);
             }
         }
 
@@ -559,7 +639,10 @@ defer:
     }
 
     arena_free(&arena);
-    gsl_histogram_free(h);
+    arena_free(&arena_str);
+
+    // TODO: free tabs
+    //gsl_histogram_free(h);
 
     return result;
 }
@@ -610,5 +693,14 @@ gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h)
     gsl_histogram_free(h);
 
     return new_h;
+}
+
+char **convert_to_char_ptr(char (*names)[MAX_NAME_SIZE], size_t size) {
+    char **p = (char **) arena_alloc(&arena_str, size * sizeof(char *));
+    for (size_t i = 0; i < size; i++) {
+        p[i] = names[i];
+    }
+
+    return p;
 }
 

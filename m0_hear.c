@@ -570,8 +570,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 da_append(&trace.necklace_sizes, necklace_size);
             }
 
-            gather_and_send_to_server(ctx, sockfd, "Energy", trace.energies.items, &trace.energies.count, &packets_sent);
-            // gather_and_send_to_server(ctx, sockfd, trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
+            // gather_and_send_to_server(ctx, sockfd, "Energy", trace.energies.items, &trace.energies.count, &packets_sent);
+            gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
         } 
     }
 
