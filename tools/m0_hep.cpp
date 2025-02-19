@@ -2,8 +2,8 @@
 #include <iomanip>
 #include <hep/mc-mpi.hpp>
 
-// #define HEAR_IMPLEMENTATION
-// #include "HeAr.h"
+#define HEAR_IMPLEMENTATION
+#include "HeAr.h"
 
 
 #define DIM 6
@@ -15,7 +15,9 @@
 #define IPTHETA 5
 
 const double Rmin = 4.0;
-const double Rmax = 20.0;
+const double Rmax = 30.0;
+
+const double ZeroCoeff = (0.00361479637/(4.0*M_PI));
 
 const double RAMTOAMU          = 1822.888485332;
 const double Hartree           = 4.3597447222071e-18; // SI: J
@@ -27,12 +29,12 @@ const double AMU               = 9.10938356e-31;
 
 const double m_He = 4.00260325413 * RAMTOAMU;
 const double m_Ar = 39.9623831237 * RAMTOAMU;
-// const double mu   = m_He * m_Ar / (m_He + m_Ar);  // a.u.
+const double mu   = m_He * m_Ar / (m_He + m_Ar);  // a.u.
 
-#include "morse.h"
-const double mu = 12500.0;
+// #include "morse.h"
+// const double mu = 12500.0;
 
-const double Temperature = 600.0; // K
+const double Temperature = 295.0; // K
 
 double Hamiltonian(double qp[])
 {
@@ -40,7 +42,7 @@ double Hamiltonian(double qp[])
 
     return qp[IPR]*qp[IPR]/2.0/mu + \
            qp[IPTHETA]*qp[IPTHETA]/2.0/mu/qp[IR]/qp[IR] + \
-           qp[IPPHI]*qp[IPPHI]/2.0/mu/qp[IR]/qp[IR]/sinTheta/sinTheta + morse(qp[IR]);
+           qp[IPPHI]*qp[IPPHI]/2.0/mu/qp[IR]/qp[IR]/sinTheta/sinTheta + V_HeAr(qp[IR]);
 }
 
 double numerator(hep::mc_point<double> const &x)
@@ -64,11 +66,11 @@ double numerator(hep::mc_point<double> const &x)
     double qp[DIM] = {R, pR, Theta, pTheta, Phi, pPhi};
     double en = Hamiltonian(qp);
 
-    //double dip = dip_HeAr(R);
-    // double dipsq = dip*dip;
-    // double dipsq = R;
+    double dip = dip_HeAr(R);
+    double dipsq = dip*dip;
+    //double dipsq = R;
 
-    double result = Jac * en * std::exp(-en/Temperature/Boltzmann_Hartree);
+    double result = Jac * dipsq * std::exp(-en/Temperature/Boltzmann_Hartree);
 	return result;
 }
 
@@ -168,10 +170,11 @@ int main(int argc, char *argv[])
     auto numerator_result   = hep::accumulate<hep::weighted_with_variance>(numerator_results.begin() + 2, numerator_results.end());
     auto denominator_result = hep::accumulate<hep::weighted_with_variance>(denominator_results.begin() + 2, denominator_results.end());
 
-    // double V = 4.0*M_PI/3.0 * Rmax*Rmax*Rmax; 
-    // double den = std::pow(2.0*M_PI*mu*Boltzmann_Hartree*Temperature, 1.5) * V; 
+    double V = 4.0*M_PI/3.0 * Rmax*Rmax*Rmax; 
+    double den = std::pow(2.0*M_PI*mu*Boltzmann_Hartree*Temperature, 1.5); 
     
-    double dipsq_mean = numerator_result.value() / denominator_result.value();
+    //double dipsq_mean = ZeroCoeff * numerator_result.value() / den;
+    double dipsq_mean = numerator_result.value() / den / V;
 
     if (rank == 0) {
         std::cout << std::fixed << std::setprecision(5);
