@@ -34,6 +34,13 @@
 #define AVOGADRO          6.022140857 * 1e23 // mol^(-1)
 #define HTOCM             2.1947463136320e5  // 1 Hartree in cm-1
 
+// if the number of attempts to move COM exceeds MAX_ATTEMPS
+// the beads are considered to be frozen and their state is resampled 
+#define MAX_ATTEMPS 500 
+
+// the burnin should not be that long here, because staging is very effective
+#define BURNIN 30
+
 #define MT_GENERATE_CODE_IN_HEADER 0
 #include "mtwist.h"
 /*
@@ -73,12 +80,12 @@ Font font = {0};
 #include "protocol.h"
 
 // ---------------------------------------------------------
-// #define m_He (4.00260325413 * RAMTOAMU)
-// #define m_Ar (39.9623831237 * RAMTOAMU)
-// #define mu m_He * m_Ar / (m_He + m_Ar)  // a.u.
+#define m_He (4.00260325413 * RAMTOAMU)
+#define m_Ar (39.9623831237 * RAMTOAMU)
+#define mu m_He * m_Ar / (m_He + m_Ar)  // a.u.
 
-#include "morse.h"
-#define mu 12500.0 
+// #include "morse.h"
+// #define mu 12500.0 
                                          
 #define lam 1.0/(2.0*mu) // hbar^2/2m
 
@@ -86,7 +93,10 @@ Font font = {0};
 #define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
 #define RMAX_COLLECT 30.0 // a.u.
-#define COORD_MAX    40.0 // a.u.
+#define COORD_MAX    50.0 // a.u.
+// NOTE: it is important to have COORD_MAX around 50.0 to have a reasonable 
+//       distribution of RCOM in case of He-Ar at 300K
+
 // ---------------------------------------------------------
 
 typedef struct {
@@ -104,6 +114,7 @@ typedef struct {
     double tau;
     double beta;
     size_t steps_since_birth;
+    size_t attempts_since_last_step;
 } Path;
 
 typedef struct {
@@ -144,6 +155,7 @@ MPI_Subcmd *find_subcmd_by_id(MPI_Subcmd *subcmds, size_t subcmds_count, const c
 void load_resources();
 int msleep(long msec);
 
+void apply_burnin(Path *path, size_t burnin_len);
 
 #define DEFINE_SUBCMD(name, desc) \
     {                             \
@@ -185,6 +197,20 @@ void sample_beads(Path *path)
     }
 }
 
+void resample_beads(Path *path) 
+{
+    // printf("resampling the beads\n");
+
+    path->steps_since_birth = 0;
+    path->attempts_since_last_step = 0;
+
+    for (size_t i = 0; i < 3*path->numTimeSlices; ++i) {
+        path->beads[i] = sample_bead(); 
+    }
+
+    apply_burnin(path, BURNIN);
+}
+
 double PotentialAction(Path path, size_t tslice) 
 {
     assert(tslice < path.numTimeSlices);
@@ -194,8 +220,8 @@ double PotentialAction(Path path, size_t tslice)
                 ZC(path.beads, tslice)*ZC(path.beads, tslice); 
     double r = sqrt(r2);
 
-    // return path.tau * V_HeAr(r);
-    return path.tau * morse(r);
+    return path.tau * V_HeAr(r);
+    // return path.tau * morse(r);
 }
 
 double Path_PotentialAction(Path path) 
@@ -207,8 +233,8 @@ double Path_PotentialAction(Path path)
                     YC(path.beads, tslice)*YC(path.beads, tslice) + 
                     ZC(path.beads, tslice)*ZC(path.beads, tslice); 
         double r = sqrt(r2);
-        // act += V_HeAr(r);
-        act += morse(r);
+        act += V_HeAr(r);
+        // act += morse(r);
     }
 
     return path.tau*act; 
@@ -252,8 +278,8 @@ double EnergyEstimator(Path path)
                     YC(path.beads, tslice)*YC(path.beads, tslice) + 
                     ZC(path.beads, tslice)*ZC(path.beads, tslice);
         double r = sqrt(r2);
-        // pot += V_HeAr(r);  
-        pot += morse(r);  
+        pot += V_HeAr(r);  
+        // pot += morse(r);  
     }
 
     // @NOTE:
@@ -261,13 +287,18 @@ double EnergyEstimator(Path path)
     return 3.0/2.0/path.tau - kin/path.numTimeSlices + pot/path.numTimeSlices;
 }
 
-void apply_burnin(Path *path, size_t burnin_len);
 
 int COM_Move(Path *path)
 {
     int result = 0;
 
-    double delta = 0.05; 
+    if (path->attempts_since_last_step > MAX_ATTEMPS) {
+        printf("NOTE: # of attemps = %zu exceeded MAX_ATTEMPS = %d so the path is resampled\n", 
+                path->attempts_since_last_step, MAX_ATTEMPS);  
+        resample_beads(path);
+    }
+
+    double delta = 0.1; // 0.05 
     double shiftx = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shifty = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
@@ -312,11 +343,11 @@ int COM_Move(Path *path)
         }
 
         if (!within) {
-            // printf("Resampling necklace\n");
-            sample_beads(path);
-            apply_burnin(path, 30);
+            //printf("Resampling necklace\n");
+            resample_beads(path);
         }
 
+        path->attempts_since_last_step = 0;
         path->steps_since_birth++;
         return_defer(1);
     } else {
@@ -325,6 +356,8 @@ int COM_Move(Path *path)
             YC(path->beads, tslice) = YC(oldbeads, tslice);
             ZC(path->beads, tslice) = ZC(oldbeads, tslice);
         }
+
+        path->attempts_since_last_step++;
 
         return_defer(0);
     }
@@ -441,7 +474,7 @@ int Simple_MH(Path path)
 void apply_burnin(Path *path, size_t burnin_len) {
     
     for (size_t steps = 0; steps < burnin_len; ) {
-        steps += COM_Move(path);
+        //steps += COM_Move(path);
 
         if (path->numTimeSlices > 1) {
             steps += Staging_Move(path);
@@ -472,13 +505,25 @@ double compute_necklace_size(Path path)
 
 void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_name, double *send_items, size_t *send_count, size_t *packets_sent)
 {
-    size_t packet_size = 1000;
-    assert(packet_size <= 1000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
-    
+    // while running 4 processes group (mpirun -np 4) P = 16 
+    // the program fails at approximately 7-8 million samples gathered with some *probably* network-related issue. 
+    // maybe the message framing is at fault? but we probably need to increase the frame size, not decrease it...
+    size_t packet_size = 2000;
+    assert(packet_size <= 2000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+   
+    int tag = 0;
+    if (strcmp(data_name, "Necklace size")) {
+        tag = 0;
+    } else if (strcmp(data_name, "Energy")) {
+        tag = 1;
+    } else {
+        tag = 2;
+    }
+
     if (*send_count >= packet_size) {
 #ifndef NO_MPI
         if (ctx.rank > 0) {
-            MPI_Send(send_items, packet_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+            MPI_Send(send_items, packet_size, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
             *send_count = 0;
         } else {
 #endif // NO_MPI
@@ -486,10 +531,11 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
             sendNamedFloat64Array(sockfd, data_name, send_items, *send_count);
             (*packets_sent)++;
             *send_count = 0;
+
 #ifndef NO_MPI
             MPI_Status status = {0}; 
             for (int i = 1; i < ctx.size; ++i) {
-                MPI_Recv(send_items, packet_size, MPI_DOUBLE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                MPI_Recv(send_items, packet_size, MPI_DOUBLE, i, tag, MPI_COMM_WORLD, &status);
                 *send_count = packet_size;
             
                 sendNamedFloat64Array(sockfd, data_name, send_items, *send_count); 
@@ -553,25 +599,22 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
                     double dipval = dip_HeAr(r);
                     m0_est = m0_est + dipval*dipval/path.numTimeSlices; 
+                    // m0_est = m0_est + r/path.numTimeSlices; 
                 }
 
                 // da_append(&trace.positions, rcom);
-                // da_append(&trace.m0s, m0_est);
+                da_append(&trace.m0s, m0_est);
                 
                 double en = EnergyEstimator(path);
                 da_append(&trace.energies, en);
                 
-
                 double necklace_size = compute_necklace_size(path); 
-                if (necklace_size > 0.2) {
-                    print_necklace(path);
-                    msleep(1000);
-                }
                 da_append(&trace.necklace_sizes, necklace_size);
             }
 
             gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
             gather_and_send_to_server(ctx, sockfd, "Energy",        trace.energies.items, &trace.energies.count, &packets_sent);
+            gather_and_send_to_server(ctx, sockfd, "mu2",           trace.m0s.items, &trace.m0s.count, &packets_sent);
         } 
     }
 
@@ -718,30 +761,26 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     (void) argc;
     (void) argv;
 
-    double T = 600.0; // K
+    double T = 300.0; // K
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     Path path = {0};
-    path.numTimeSlices = 16; 
+    path.numTimeSlices = 64; 
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
 
     double necklace_size_refVal = beta/12.0/mu; /* * hbar^2 */  
+    double energy_refVal = 1.42417e-03; // mean(E) for HeAr [300 K]
+    double mu2_refVal    = 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
+    // double mu2_refVal = 22.578; // mean(R) for HeAr [300K]
 
+    // double energy_refVal = -9.05971e-03; // mean(E) for MORSE [600 K] 
+    
     // double coeff = pow(4.0 * M_PI * lam * path.tau, -1.5);
-
     // Source: M0 at 295K from diploma
     // double refVal = 5.27e-05;
-
-    // double refVal = 22.491;   // mean(R) obtained with HEP: int(R*exp(-H/kT))/int(exp(-H/kT)) 
-    // double refVal = 17.525;   // mean(R) obtained with HEP: int(R*exp(-V/kT))/int(exp(-V/kT))
-    // double refVal = 2.14e-6;  // mean(mu^2) obtained with HEP: int(mu^2 exp(-V/kT))/int(exp(-V/kT)) 
-    // double refVal = 1.655e-07;   // mean(mu^2) obtained with HEP [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
     // double refVal = 2.18387e-07; // mean(mu^2) obtained with HEP [400K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT)) 
-
-    // double refVal = 7.11076e-04; // mean(E) obtained with HEP [300 K] 
-    double energy_refVal = -9.05971e-03; // mean(E) for MORSE 
 
     if (ctx.rank == 0) {
         printf("Simulation parameters:\n");
@@ -751,6 +790,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     }
 
     sample_beads(&path);
+    apply_burnin(&path, BURNIN);
 
     int sockfd = 0; 
     if (ctx.rank == 0) { 
@@ -763,6 +803,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendInt32(sockfd, ctx.size);
             sendNamedFloat64(sockfd, "Necklace size", necklace_size_refVal);
             sendNamedFloat64(sockfd, "Energy", energy_refVal);
+            sendNamedFloat64(sockfd, "mu2", mu2_refVal);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
