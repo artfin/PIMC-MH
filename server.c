@@ -28,6 +28,8 @@ static Arena arena_str = {0};
 
 // #define SHOW_NUMBERED_HISTOGRAM_COLUMNS
 
+// TODO: show the value on specific column of histogram when hovered upon in the tooltip
+
 typedef struct {
     double *items;
     size_t count;
@@ -398,6 +400,7 @@ int main()
 
     strcpy(tab_names[0], "Necklace size");
     strcpy(tab_names[1], "Energy");
+    strcpy(tab_names[2], "mu2");
     for (size_t i = 0; i < MAX_TABS; ++i) {
         char *name = tab_names[i];
         if (strlen(name) > 0) {
@@ -667,7 +670,7 @@ defer:
 gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h)
 {
     size_t nbins = h->n;
-    double add_bins = 1;
+    double add_bins = 10;
     
     double xmin = h->range[0];
     double xmax = h->range[nbins];
@@ -691,7 +694,7 @@ gsl_histogram* gsl_histogram_extend_left(gsl_histogram* h)
 gsl_histogram* gsl_histogram_extend_right(gsl_histogram* h)
 {
     size_t nbins = h->n;
-    double add_bins = 1;
+    double add_bins = 10;
     
     double xmin = h->range[0];
     double xmax = h->range[nbins];

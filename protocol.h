@@ -336,7 +336,7 @@ int initClient()
         return -1;
     }
 
-    if (msg && (strcmp(msg, HANDSHAKE_MSG) != 0)) {
+    if (msg && (strncmp(msg, HANDSHAKE_MSG, msg_length) != 0)) {
         fprintf(stderr, "[client] Connection is not established\n");
         return -1; 
     }
@@ -482,7 +482,7 @@ SocketOpResult recvNamedFloat64Array(int sockfd, char **name, double **data, siz
     *data = bytes + sizeof(uint32_t) + sizeof(MessageKind) + MAX_NAME_SIZE*sizeof(char);
 
     if (_verbose) {
-        printf("(recvNamedFloat64Array): message contents = {[name] %.*s, %u bytes, %zu float64s] %.3lf ...\n", MAX_NAME_SIZE, *name, sz, *count, (*data)[0]);
+        printf("(recvNamedFloat64Array): message contents = {[name] %.*s, %u bytes, %zu float64s] %.3e ...\n", MAX_NAME_SIZE, *name, sz, *count, (*data)[0]);
     }
     
     return SOCKOP_SUCCESS; 
