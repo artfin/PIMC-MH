@@ -89,11 +89,11 @@ Font font = {0};
                                          
 #define lam 1.0/(2.0*mu) // hbar^2/2m
 
-#define COORD_SAMPLE_MIN 4.0
+#define COORD_SAMPLE_MIN 3.0
 #define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
-#define RMAX_COLLECT 30.0 // a.u.
-#define COORD_MAX    50.0 // a.u.
+#define RMAX_COLLECT 9.0 // a.u.
+#define COORD_MAX    250.0 // a.u.
 // NOTE: it is important to have COORD_MAX around 50.0 to have a reasonable 
 //       distribution of RCOM in case of He-Ar at 300K
 
@@ -298,7 +298,7 @@ int COM_Move(Path *path)
         resample_beads(path);
     }
 
-    double delta = 0.1; // 0.05 
+    double delta = 0.1; // 0.1 
     double shiftx = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shifty = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
     double shiftz = delta*COORD_SAMPLE_MAX*0.5*(-1.0 + 2.0*mt_drand());
@@ -474,7 +474,7 @@ int Simple_MH(Path path)
 void apply_burnin(Path *path, size_t burnin_len) {
     
     for (size_t steps = 0; steps < burnin_len; ) {
-        //steps += COM_Move(path);
+        steps += COM_Move(path);
 
         if (path->numTimeSlices > 1) {
             steps += Staging_Move(path);
@@ -508,8 +508,8 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
     // while running 4 processes group (mpirun -np 4) P = 16 
     // the program fails at approximately 7-8 million samples gathered with some *probably* network-related issue. 
     // maybe the message framing is at fault? but we probably need to increase the frame size, not decrease it...
-    size_t packet_size = 2000;
-    assert(packet_size <= 2000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
+    size_t packet_size = 5000;
+    assert(packet_size <= 5000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
    
     int tag = 0;
     if (strcmp(data_name, "Necklace size")) {
@@ -571,6 +571,8 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
     size_t packets_sent = 0;
 
+    double V = 4.0/3.0*M_PI*RMAX_COLLECT*RMAX_COLLECT*RMAX_COLLECT;
+
     for (size_t step = 0; step < numSteps; ++step) {
         acc.CenterOfMass += COM_Move(&path);
 
@@ -598,8 +600,9 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                     double r = sqrt(r2);
 
                     double dipval = dip_HeAr(r);
-                    m0_est = m0_est + dipval*dipval/path.numTimeSlices; 
-                    // m0_est = m0_est + r/path.numTimeSlices; 
+                    //m0_est = m0_est + 1.0/path.numTimeSlices; 
+                    m0_est = m0_est + dipval*dipval/path.numTimeSlices*V; 
+                    //m0_est = m0_est + r/path.numTimeSlices; 
                 }
 
                 // da_append(&trace.positions, rcom);
@@ -765,14 +768,16 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     double beta = 1.0/(Boltzmann_Hartree * T); 
 
     Path path = {0};
-    path.numTimeSlices = 64; 
+    path.numTimeSlices = 4; 
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
+    
+    double V = 4.0/3.0*M_PI*30.0*30.0*30.0;
 
     double necklace_size_refVal = beta/12.0/mu; /* * hbar^2 */  
     double energy_refVal = 1.42417e-03; // mean(E) for HeAr [300 K]
-    double mu2_refVal    = 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
+    double mu2_refVal    = V * 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
     // double mu2_refVal = 22.578; // mean(R) for HeAr [300K]
 
     // double energy_refVal = -9.05971e-03; // mean(E) for MORSE [600 K] 
