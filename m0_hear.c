@@ -93,7 +93,7 @@ Font font = {0};
 #define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
 #define RMAX_COLLECT 9.0 // a.u.
-#define COORD_MAX    250.0 // a.u.
+#define COORD_MAX    100.0 // 250.0 // a.u.
 // NOTE: it is important to have COORD_MAX around 50.0 to have a reasonable 
 //       distribution of RCOM in case of He-Ar at 300K
 
@@ -503,6 +503,124 @@ double compute_necklace_size(Path path)
     return sqrt(necklace_size)/path.numTimeSlices;
 }
 
+char* shift(int *argc, char ***argv)
+{
+    assert(*argc > 0);
+    char *result = *argv[0];
+
+    *argc -= 1;
+    *argv += 1;
+
+    return result; 
+}
+
+void usage(const char *program_path, MPI_Subcmd *subcmds, size_t subcmds_count)
+{
+    fprintf(stderr, "Usage: %s [subcommand]\n", program_path);
+    fprintf(stderr, "Subcommands:\n");
+
+    int width = 0;
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        int len = strlen(subcmds[k].id);
+        if (width < len) width = len;
+    }
+
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        fprintf(stderr, "    %-*s - %s\n", width, subcmds[k].id, subcmds[k].description);
+    }
+}
+
+MPI_Subcmd *find_subcmd_by_id(MPI_Subcmd *subcmds, size_t subcmds_count, const char *id) 
+{
+    for (size_t k = 0; k < subcmds_count; ++k) {
+        if (strcmp(subcmds[k].id, id) == 0) {
+            return &subcmds[k];
+        }
+    }
+
+    return NULL; 
+}
+
+void load_resources()
+{
+    int fileSize = 0;
+    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
+
+    font.baseSize = FONT_SIZE_LOAD;
+    font.glyphCount = 95;
+    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
+    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
+    font.texture = LoadTextureFromImage(atlas);
+
+    UnloadImage(atlas);
+    UnloadFileData(fileData);
+}
+
+int msleep(long msec)
+{
+    struct timespec ts = { 
+        .tv_sec = msec / 1000,
+        .tv_nsec = (msec % 1000) * 1000000,
+    };
+
+    int res;
+    do {
+        res = nanosleep(&ts, &ts);
+    } while (res && errno == EINTR);
+
+    return res;
+}
+
+void gather_and_report_results(MPI_Context ctx, const char *data_name, double *send_items, size_t *send_count, 
+                               double *result, size_t *result_count)
+// let's assume here that we're working in MPI environment and handle the reporting for 1 client separately
+//
+// result: current estimate of the value (Necklace size, Energy or mu2 for now)
+// result_count: the number of values that are used in this estimate
+{
+    size_t packet_size = 1000; 
+
+    int tag = 0;
+    if (strcmp(data_name, "Necklace size") == 0) {
+        tag = 0;
+    } else if (strcmp(data_name, "Energy") == 0) {
+        tag = 1;
+    } else if (strcmp(data_name, "mu2") == 0) {
+        tag = 2;
+    } else {
+        assert(0 && "UNREACHABLE");
+    }
+
+    if (*send_count >= packet_size) {
+        if (ctx.rank > 0) {
+            double packet_mean = 0.0;
+            for (size_t i = 0; i < packet_size; ++i) {
+                packet_mean += send_items[i] / packet_size;
+            }
+            *send_count = 0;
+
+            MPI_Send(&packet_mean, 1, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
+        } else {
+            double packet_mean = 0.0;
+
+            MPI_Status status = {0}; 
+            for (int i = 1; i < ctx.size; ++i) {
+                MPI_Recv(&packet_mean, 1, MPI_DOUBLE, i, tag, MPI_COMM_WORLD, &status);
+                printf("[0] Received mean from client (%d)\n", status.MPI_SOURCE);
+
+                *result = *result * *result_count + packet_mean * packet_size;
+                *result_count = *result_count + packet_size;
+                *result = *result / *result_count;
+            }
+       
+            if (strcmp(data_name, "mu2") == 0) { 
+                printf("%s: # of estimates = %zu: %.6e\n", data_name, *result_count, *result);
+            }
+        }
+    }
+
+}
+
 void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_name, double *send_items, size_t *send_count, size_t *packets_sent)
 {
     // while running 4 processes group (mpirun -np 4) P = 16 
@@ -512,12 +630,14 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
     assert(packet_size <= 5000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
    
     int tag = 0;
-    if (strcmp(data_name, "Necklace size")) {
+    if (strcmp(data_name, "Necklace size") == 0) {
         tag = 0;
-    } else if (strcmp(data_name, "Energy")) {
+    } else if (strcmp(data_name, "Energy") == 0) {
         tag = 1;
-    } else {
+    } else if (strcmp(data_name, "mu2") == 0) {
         tag = 2;
+    } else {
+        assert(0 && "UNREACHABLE");
     }
 
     if (*send_count >= packet_size) {
@@ -573,6 +693,13 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
 
     double V = 4.0/3.0*M_PI*RMAX_COLLECT*RMAX_COLLECT*RMAX_COLLECT;
 
+    double necklace_size_mean = 0.0;
+    size_t necklace_size_count = 0;
+    double energy_mean = 0.0;
+    size_t energy_count = 0;
+    double m0_mean = 0.0;
+    size_t m0_count = 0; 
+
     for (size_t step = 0; step < numSteps; ++step) {
         acc.CenterOfMass += COM_Move(&path);
 
@@ -615,9 +742,15 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 da_append(&trace.necklace_sizes, necklace_size);
             }
 
-            gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
-            gather_and_send_to_server(ctx, sockfd, "Energy",        trace.energies.items, &trace.energies.count, &packets_sent);
-            gather_and_send_to_server(ctx, sockfd, "mu2",           trace.m0s.items, &trace.m0s.count, &packets_sent);
+            if (sockfd > 0) {
+                gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
+                gather_and_send_to_server(ctx, sockfd, "Energy",        trace.energies.items,       &trace.energies.count,       &packets_sent);
+                gather_and_send_to_server(ctx, sockfd, "mu2",           trace.m0s.items,            &trace.m0s.count,            &packets_sent);
+            } else {
+                gather_and_report_results(ctx, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &necklace_size_mean, &necklace_size_count);
+                gather_and_report_results(ctx, "Energy",        trace.energies.items,       &trace.energies.count, &energy_mean, &energy_count);
+                gather_and_report_results(ctx, "mu2",           trace.m0s.items,            &trace.m0s.count, &m0_mean, &m0_count);
+            }
         } 
     }
 
@@ -757,7 +890,38 @@ typedef struct {
     double mean;
     double std; 
 } Stats;  
-Stats getStats(double *arr, size_t count); 
+
+Stats getStats(double *arr, size_t count) 
+{
+    Stats s = {0};
+    
+    s.max = FLT_MIN;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] > s.max) s.max = arr[i];
+    }
+
+    s.min = FLT_MAX;
+    for (size_t i = 0; i < count; ++i) {
+        if (arr[i] < s.min) s.min = arr[i];
+    }
+    
+    for (size_t i = 0; i < count; ++i) {
+        s.mean = s.mean + arr[i];
+    }
+
+    s.mean /= count;
+
+    double r = 0;
+    for (size_t i = 0; i < count; ++i) {
+        r = r + (arr[i] - s.mean) * (arr[i] - s.mean); 
+    }
+
+    r = r / (count - 1);
+    s.std = sqrt(r);
+
+    return s;
+}
+
 
 void subcmd_run(MPI_Context ctx, int argc, char **argv)
 {
@@ -772,12 +936,14 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     path.tau = beta/path.numTimeSlices;
     path.beta = beta;
     alloc_beads(&path);
-    
-    double V = 4.0/3.0*M_PI*30.0*30.0*30.0;
+   
 
     double necklace_size_refVal = beta/12.0/mu; /* * hbar^2 */  
     double energy_refVal = 1.42417e-03; // mean(E) for HeAr [300 K]
-    double mu2_refVal    = V * 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
+
+    // note that this value <mu^2> is computed with Rmax = 30.0    
+    double V = 4.0/3.0*M_PI*30.0*30.0*30.0;
+    double mu2_refVal = V * 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
     // double mu2_refVal = 22.578; // mean(R) for HeAr [300K]
 
     // double energy_refVal = -9.05971e-03; // mean(E) for MORSE [600 K] 
@@ -800,9 +966,9 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     int sockfd = 0; 
     if (ctx.rank == 0) { 
         sockfd = initClient();
-        printf("connection established at socket = %d\n", sockfd);
-
+        
         if (sockfd > 0) {
+            printf("connection established at socket = %d\n", sockfd);
             sendFloat64(sockfd, path.beta);
             sendInt32(sockfd, (int) path.numTimeSlices);
             sendInt32(sockfd, ctx.size);
@@ -1142,103 +1308,5 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-Stats getStats(double *arr, size_t count) 
-{
-    Stats s = {0};
-    
-    s.max = FLT_MIN;
-    for (size_t i = 0; i < count; ++i) {
-        if (arr[i] > s.max) s.max = arr[i];
-    }
-
-    s.min = FLT_MAX;
-    for (size_t i = 0; i < count; ++i) {
-        if (arr[i] < s.min) s.min = arr[i];
-    }
-    
-    for (size_t i = 0; i < count; ++i) {
-        s.mean = s.mean + arr[i];
-    }
-
-    s.mean /= count;
-
-    double r = 0;
-    for (size_t i = 0; i < count; ++i) {
-        r = r + (arr[i] - s.mean) * (arr[i] - s.mean); 
-    }
-
-    r = r / (count - 1);
-    s.std = sqrt(r);
-
-    return s;
-}
-
-char* shift(int *argc, char ***argv)
-{
-    assert(*argc > 0);
-    char *result = *argv[0];
-
-    *argc -= 1;
-    *argv += 1;
-
-    return result; 
-}
-
-void usage(const char *program_path, MPI_Subcmd *subcmds, size_t subcmds_count)
-{
-    fprintf(stderr, "Usage: %s [subcommand]\n", program_path);
-    fprintf(stderr, "Subcommands:\n");
-
-    int width = 0;
-    for (size_t k = 0; k < subcmds_count; ++k) {
-        int len = strlen(subcmds[k].id);
-        if (width < len) width = len;
-    }
-
-    for (size_t k = 0; k < subcmds_count; ++k) {
-        fprintf(stderr, "    %-*s - %s\n", width, subcmds[k].id, subcmds[k].description);
-    }
-}
-
-MPI_Subcmd *find_subcmd_by_id(MPI_Subcmd *subcmds, size_t subcmds_count, const char *id) 
-{
-    for (size_t k = 0; k < subcmds_count; ++k) {
-        if (strcmp(subcmds[k].id, id) == 0) {
-            return &subcmds[k];
-        }
-    }
-
-    return NULL; 
-}
-
-void load_resources()
-{
-    int fileSize = 0;
-    unsigned char* fileData = LoadFileData("resources/Alegreya-Regular.ttf", &fileSize);
-
-    font.baseSize = FONT_SIZE_LOAD;
-    font.glyphCount = 95;
-    font.glyphs = LoadFontData(fileData, fileSize, FONT_SIZE_LOAD, 0, 95, FONT_SDF);
-    Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, 95, FONT_SIZE_LOAD, 4, 0);
-    font.texture = LoadTextureFromImage(atlas);
-
-    UnloadImage(atlas);
-    UnloadFileData(fileData);
-}
-
-int msleep(long msec)
-{
-    struct timespec ts = { 
-        .tv_sec = msec / 1000,
-        .tv_nsec = (msec % 1000) * 1000000,
-    };
-
-    int res;
-    do {
-        res = nanosleep(&ts, &ts);
-    } while (res && errno == EINTR);
-
-    return res;
-}
 // M0 (true) = 5.27e-6
 // T = 300 K -> M0 (est) = 5.47e-6, N = 150 mln
