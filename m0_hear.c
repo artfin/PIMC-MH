@@ -606,7 +606,7 @@ void gather_and_report_results(MPI_Context ctx, const char *data_name, double *s
             MPI_Status status = {0}; 
             for (int i = 1; i < ctx.size; ++i) {
                 MPI_Recv(&packet_mean, 1, MPI_DOUBLE, i, tag, MPI_COMM_WORLD, &status);
-                printf("[0] Received mean from client (%d)\n", status.MPI_SOURCE);
+                printf("[0] Received mean tagged %d from client (%d) => mean = %.5e\n", tag, status.MPI_SOURCE, packet_mean);
 
                 *result = *result * *result_count + packet_mean * packet_size;
                 *result_count = *result_count + packet_size;
