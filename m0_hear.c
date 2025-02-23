@@ -115,6 +115,10 @@ typedef struct {
     double beta;
     size_t steps_since_birth;
     size_t attempts_since_last_step;
+    
+    double necklace_size_ref_value;
+    double energy_ref_value;
+    double m0_ref_value; 
 } Path;
 
 typedef struct {
@@ -613,9 +617,6 @@ void gather_and_report_results(MPI_Context ctx, const char *data_name, double *s
                 *result = *result / *result_count;
             }
        
-            if (strcmp(data_name, "mu2") == 0) { 
-                printf("%s: # of estimates = %zu: %.6e\n", data_name, *result_count, *result);
-            }
         }
     }
 
@@ -750,6 +751,13 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
                 gather_and_report_results(ctx, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &necklace_size_mean, &necklace_size_count);
                 gather_and_report_results(ctx, "Energy",        trace.energies.items,       &trace.energies.count, &energy_mean, &energy_count);
                 gather_and_report_results(ctx, "mu2",           trace.m0s.items,            &trace.m0s.count, &m0_mean, &m0_count);
+
+                if ((m0_count > 0) && (m0_count % 1000 == 0)) { 
+                    printf("M0: # of estimates = %zu: %.6e, reference: %.6e, diff: %.3f%%\n", 
+                            m0_count, m0_mean, path.m0_ref_value, (m0_mean - path.m0_ref_value) / path.m0_ref_value * 100.0);
+                }
+
+
             }
         } 
     }
@@ -938,12 +946,12 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
     alloc_beads(&path);
    
 
-    double necklace_size_refVal = beta/12.0/mu; /* * hbar^2 */  
-    double energy_refVal = 1.42417e-03; // mean(E) for HeAr [300 K]
+    path.necklace_size_ref_value = beta/12.0/mu; /* * hbar^2 */  
+    path.energy_ref_value = 1.42417e-03; // mean(E) for HeAr [300 K]
 
     // note that this value <mu^2> is computed with Rmax = 30.0    
     double V = 4.0/3.0*M_PI*30.0*30.0*30.0;
-    double mu2_refVal = V * 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
+    path.m0_ref_value = V * 1.655e-07;   // mean(mu^2) for HeAr [300K]: int(mu^2 exp(-H/kT))/int(exp(-H/kT))
     // double mu2_refVal = 22.578; // mean(R) for HeAr [300K]
 
     // double energy_refVal = -9.05971e-03; // mean(E) for MORSE [600 K] 
@@ -972,9 +980,9 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendFloat64(sockfd, path.beta);
             sendInt32(sockfd, (int) path.numTimeSlices);
             sendInt32(sockfd, ctx.size);
-            sendNamedFloat64(sockfd, "Necklace size", necklace_size_refVal);
-            sendNamedFloat64(sockfd, "Energy", energy_refVal);
-            sendNamedFloat64(sockfd, "mu2", mu2_refVal);
+            sendNamedFloat64(sockfd, "Necklace size", path.necklace_size_ref_value);
+            sendNamedFloat64(sockfd, "Energy", path.energy_ref_value);
+            sendNamedFloat64(sockfd, "mu2", path.m0_ref_value);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
