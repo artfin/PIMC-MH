@@ -3,5 +3,10 @@
 *.exe
 animation_curve.c
 gui_curve_editor.h
+binn.c
+binn.h
+binn_test.c
+nob.h
+sho-pimc.py
 raygui-4.0/
 TAGS
