@@ -93,9 +93,7 @@ Font font = {0};
 #define COORD_SAMPLE_MAX 30.0 // a.u -- we sample coordinates within this cube ???
 #define RMIN_COLLECT 4.0  // a.u.
 #define RMAX_COLLECT 9.0 // a.u.
-#define COORD_MAX    100.0 // 250.0 // a.u.
-// NOTE: it is important to have COORD_MAX around 50.0 to have a reasonable 
-//       distribution of RCOM in case of He-Ar at 300K
+#define COORD_MAX    250.0 // a.u.
 
 // ---------------------------------------------------------
 
@@ -575,12 +573,14 @@ int msleep(long msec)
     return res;
 }
 
-void gather_and_report_results(MPI_Context ctx, const char *data_name, double *send_items, size_t *send_count, 
+bool gather_and_report_results(MPI_Context ctx, const char *data_name, double *send_items, size_t *send_count, 
                                double *result, size_t *result_count)
 // let's assume here that we're working in MPI environment and handle the reporting for 1 client separately
 //
 // result: current estimate of the value (Necklace size, Energy or mu2 for now)
 // result_count: the number of values that are used in this estimate
+//
+// returns true for main process when the results have been updated 
 {
     size_t packet_size = 1000; 
 
@@ -589,7 +589,7 @@ void gather_and_report_results(MPI_Context ctx, const char *data_name, double *s
         tag = 0;
     } else if (strcmp(data_name, "Energy") == 0) {
         tag = 1;
-    } else if (strcmp(data_name, "mu2") == 0) {
+    } else if (strcmp(data_name, "m0") == 0) {
         tag = 2;
     } else {
         assert(0 && "UNREACHABLE");
@@ -601,25 +601,43 @@ void gather_and_report_results(MPI_Context ctx, const char *data_name, double *s
             for (size_t i = 0; i < packet_size; ++i) {
                 packet_mean += send_items[i] / packet_size;
             }
+            memset(send_items, 0.0, packet_size * sizeof(double));
             *send_count = 0;
 
             MPI_Send(&packet_mean, 1, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
+            return false;
         } else {
+            // handle the results accumulated in main process
             double packet_mean = 0.0;
+            for (size_t i = 0; i < packet_size; ++i) {
+                packet_mean += send_items[i] / packet_size;
+            }
+            memset(send_items, 0.0, packet_size * sizeof(double));
+            *send_count = 0;
+            
+            printf("[0] Accumulating mean tagged %d from client (%d) => mean = %.5e\n", tag, 0, packet_mean);
+            *result = *result * *result_count + packet_mean * packet_size;
+            *result_count = *result_count + packet_size;
+            *result = *result / *result_count;
+           
+            // receive results from other processes 
+            packet_mean = 0.0;
 
             MPI_Status status = {0}; 
             for (int i = 1; i < ctx.size; ++i) {
                 MPI_Recv(&packet_mean, 1, MPI_DOUBLE, i, tag, MPI_COMM_WORLD, &status);
-                printf("[0] Received mean tagged %d from client (%d) => mean = %.5e\n", tag, status.MPI_SOURCE, packet_mean);
+                printf("[0] Accumulating mean tagged %d from client (%d) => mean = %.5e\n", tag, status.MPI_SOURCE, packet_mean);
 
                 *result = *result * *result_count + packet_mean * packet_size;
                 *result_count = *result_count + packet_size;
                 *result = *result / *result_count;
             }
        
+            return true;
         }
     }
-
+    
+    return false;
 }
 
 void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_name, double *send_items, size_t *send_count, size_t *packets_sent)
@@ -627,7 +645,7 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
     // while running 4 processes group (mpirun -np 4) P = 16 
     // the program fails at approximately 7-8 million samples gathered with some *probably* network-related issue. 
     // maybe the message framing is at fault? but we probably need to increase the frame size, not decrease it...
-    size_t packet_size = 5000;
+    size_t packet_size = 1000;
     assert(packet_size <= 5000 && " NOTE: keep the packet_size under 100 for now. In the local network we encounter problems with sending larger packets\n");
    
     int tag = 0;
@@ -635,7 +653,7 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
         tag = 0;
     } else if (strcmp(data_name, "Energy") == 0) {
         tag = 1;
-    } else if (strcmp(data_name, "mu2") == 0) {
+    } else if (strcmp(data_name, "m0") == 0) {
         tag = 2;
     } else {
         assert(0 && "UNREACHABLE");
@@ -658,7 +676,9 @@ void gather_and_send_to_server(MPI_Context ctx, int sockfd, const char *data_nam
             for (int i = 1; i < ctx.size; ++i) {
                 MPI_Recv(send_items, packet_size, MPI_DOUBLE, i, tag, MPI_COMM_WORLD, &status);
                 *send_count = packet_size;
-            
+     
+                printf("[0] Received packet tagged %d from client (%d)\n", tag, status.MPI_SOURCE);
+
                 sendNamedFloat64Array(sockfd, data_name, send_items, *send_count); 
                 (*packets_sent)++;
                 *send_count = 0;
@@ -699,7 +719,7 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
     double energy_mean = 0.0;
     size_t energy_count = 0;
     double m0_mean = 0.0;
-    size_t m0_count = 0; 
+    size_t m0_count = 0;
 
     for (size_t step = 0; step < numSteps; ++step) {
         acc.CenterOfMass += COM_Move(&path);
@@ -746,18 +766,18 @@ void pimc_driver(MPI_Context ctx, Path path, size_t numSteps, int sockfd)
             if (sockfd > 0) {
                 gather_and_send_to_server(ctx, sockfd, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &packets_sent);
                 gather_and_send_to_server(ctx, sockfd, "Energy",        trace.energies.items,       &trace.energies.count,       &packets_sent);
-                gather_and_send_to_server(ctx, sockfd, "mu2",           trace.m0s.items,            &trace.m0s.count,            &packets_sent);
+                gather_and_send_to_server(ctx, sockfd, "m0",            trace.m0s.items,            &trace.m0s.count,            &packets_sent);
             } else {
                 gather_and_report_results(ctx, "Necklace size", trace.necklace_sizes.items, &trace.necklace_sizes.count, &necklace_size_mean, &necklace_size_count);
-                gather_and_report_results(ctx, "Energy",        trace.energies.items,       &trace.energies.count, &energy_mean, &energy_count);
-                gather_and_report_results(ctx, "mu2",           trace.m0s.items,            &trace.m0s.count, &m0_mean, &m0_count);
+                gather_and_report_results(ctx, "Energy", trace.energies.items, &trace.energies.count, &energy_mean, &energy_count);
+                bool updated = gather_and_report_results(ctx, "m0", trace.m0s.items, &trace.m0s.count, &m0_mean, &m0_count);
 
-                if ((m0_count > 0) && (m0_count % 1000 == 0)) { 
-                    printf("M0: # of estimates = %zu: %.6e, reference: %.6e, diff: %.3f%%\n", 
-                            m0_count, m0_mean, path.m0_ref_value, (m0_mean - path.m0_ref_value) / path.m0_ref_value * 100.0);
+                if (updated) {
+                  if ((m0_count != 0) && (m0_count % 1000 == 0)) { 
+                      printf("M0: # of estimates = %zu: %.6e, reference: %.6e, diff: %.3f%%\n", 
+                              m0_count, m0_mean, path.m0_ref_value, (m0_mean - path.m0_ref_value) / path.m0_ref_value * 100.0);
+                  }
                 }
-
-
             }
         } 
     }
@@ -982,7 +1002,7 @@ void subcmd_run(MPI_Context ctx, int argc, char **argv)
             sendInt32(sockfd, ctx.size);
             sendNamedFloat64(sockfd, "Necklace size", path.necklace_size_ref_value);
             sendNamedFloat64(sockfd, "Energy", path.energy_ref_value);
-            sendNamedFloat64(sockfd, "mu2", path.m0_ref_value);
+            sendNamedFloat64(sockfd, "m0", path.m0_ref_value);
         } else {
             fprintf(stderr, "ERROR: client could not connect to server\n");
             fprintf(stderr, "Continuing calculation without communicating with the server\n\n");
