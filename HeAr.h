@@ -11,6 +11,11 @@ double dip_HeAr(double R)
     return exp(0.47293181 - 0.40100613 * R - 0.10292726 * R * R) -148.55391 * pow(R, -7);
 }
 
+double ddip_HeAr(double R)
+{
+    return (-0.40100613e0 - 0.20585452e0 * R) * exp(0.47293181e0 - 0.40100613e0 * R - 0.10292726e0 * pow(R, 0.2e1)) + 0.103987737e4 * pow(R, -0.8e1); 
+}
+
 double V_HeAr(double R)
 {
     double t2, t5, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t25, t26, t27, t28,

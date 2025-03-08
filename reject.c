@@ -67,7 +67,7 @@
 
 #define Rmin 6.597835932201344e+00
 
-#define NBEADS 4
+#define NBEADS 16
 
 // Sampling scheme outline:
 // The construction of the proposal distribution is the following:
@@ -87,10 +87,10 @@
 #define RMIN 4.0   
 #define XMAX 30.0
 #define VOLUME (2*XMAX)*(2*XMAX)*(2*XMAX)
-#define Temperature 300.0 
+#define Temperature 50.0 
 #define beta 1.0/(Boltzmann_Hartree * Temperature)
 
-#define MCMC_KSI_SIGMA 0.05
+#define MCMC_KSI_SIGMA 0.02
 #define MCMC_KSI_BURNIN 1000
 #define MCMC_KSI_SKIP 20
 
@@ -184,39 +184,18 @@ bool make_step(mt_state* mts, double *ksi)
 
 void sample_with_mcmc(mt_state *mts, double *x, double *ksi, bool first)
 {
-    // sample new position of zeroth bead
-    // double xn[3]; 
-    // xn[0] = XMAX * (2.0*mts_drand(mts) - 1.0); // [-XMAX, XMAX]
-    // xn[1] = XMAX * (2.0*mts_drand(mts) - 1.0);
-    // xn[2] = XMAX * (2.0*mts_drand(mts) - 1.0);
-
-    // and move necklace to the new position of the zeroth bead without changing 
-    // distances between the beads 
-    // for (size_t i = 1; i < NBEADS; ++i) {
-    //     x[3*i + 0] += (xn[0] - x[0]); 
-    //     x[3*i + 1] += (xn[1] - x[1]); 
-    //     x[3*i + 2] += (xn[2] - x[2]); 
-    // }
-
-    // x[0] = xn[0];
-    // x[1] = xn[1];
-    // x[2] = xn[2];
-
-    // double ksi[3*(NBEADS - 1)] = {0};
-    // for (size_t i = 1; i < NBEADS; ++i) {
-    //     ksi[3*(i-1) + 0] = x[3*i + 0] - x[0]; 
-    //     ksi[3*(i-1) + 1] = x[3*i + 1] - x[1]; 
-    //     ksi[3*(i-1) + 2] = x[3*i + 2] - x[2]; 
-    // }
-
     if (first) {
+        size_t acc = 0;
+
         memset(ksi, 0, 3*(NBEADS-1)*sizeof(double));
     
         for (size_t i = 0; i < MCMC_KSI_BURNIN; ++i) {
-            make_step(mts, &ksi[0]);
-            make_step(mts, &ksi[1]);
-            make_step(mts, &ksi[2]);
-        } 
+            acc += make_step(mts, &ksi[0]);
+            acc += make_step(mts, &ksi[1]);
+            acc += make_step(mts, &ksi[2]);
+        }
+
+        printf("MCMC acceptance rate: %.3e%%\n", (float)acc/3.0/MCMC_KSI_BURNIN * 100.0); 
     } else { 
         x[0] = XMAX * (2.0*mts_drand(mts) - 1.0); // [-XMAX, XMAX]
         x[1] = XMAX * (2.0*mts_drand(mts) - 1.0);
@@ -440,133 +419,6 @@ void make_estimate_with_mcmc_proposal(mt_state *mts, size_t npoints, double *mea
     fclose(fd); 
 }
 
-/*
-bool make_mcmc_move_for_deltas(mt_state* mts, double *x)
-{
-    double oldx[3*NBEADS] = {0};
-    for (size_t i = 1; i < NBEADS; ++i) {
-        oldx[3*i + 0] = x[3*i + 0];
-        oldx[3*i + 1] = x[3*i + 1];
-        oldx[3*i + 2] = x[3*i + 2];
-    }
-    
-    double Vs = 0.0; 
-    for (size_t i = 0; i < NBEADS; ++i) {
-        double r = sqrt(x[3*i + 0]*x[3*i + 0] + x[3*i + 1]*x[3*i + 1] + x[3*i + 2]*x[3*i + 2]);
-        Vs += beta*V_HeAr(r)/NBEADS;
-    }
-
-    double C = mu*NBEADS/(2.0*beta);
-    double kin = 0.0;
-    for (size_t i = 1; i < NBEADS; ++i) {
-        kin = kin + C*((x[3*i + 0] - x[3*(i-1) + 0])*(x[3*i + 0] - x[3*(i-1) + 0]) + \
-                       (x[3*i + 1] - x[3*(i-1) + 1])*(x[3*i + 1] - x[3*(i-1) + 1]) + \
-                       (x[3*i + 2] - x[3*(i-1) + 2])*(x[3*i + 2] - x[3*(i-1) + 2]));
-    }
-    kin = kin + C*((x[0] - x[3*(NBEADS-1) + 0])*(x[0] - x[3*(NBEADS-1) + 0]) + \
-                   (x[1] - x[3*(NBEADS-1) + 1])*(x[1] - x[3*(NBEADS-1) + 1]) + \
-                   (x[2] - x[3*(NBEADS-1) + 2])*(x[2] - x[3*(NBEADS-1) + 2]));
-
-
-    double old_density = exp(-(kin + Vs));  
-    printf("kin = %.5e, Vs = %.5e => old_density = %.5e\n", kin, Vs, old_density);
-
-    for (size_t i = 1; i < NBEADS; ++i) {
-        x[3*i + 0] = x[3*i + 0] + generate_normal(mts, MCMC_SIGMA); 
-        x[3*i + 1] = x[3*i + 1] + generate_normal(mts, MCMC_SIGMA); 
-        x[3*i + 2] = x[3*i + 2] + generate_normal(mts, MCMC_SIGMA); 
-    }
-
-    Vs = 0.0; 
-    for (size_t i = 0; i < NBEADS; ++i) {
-        double r = sqrt(x[3*i + 0]*x[3*i + 0] + x[3*i + 1]*x[3*i + 1] + x[3*i + 2]*x[3*i + 2]);
-        Vs += beta*V_HeAr(r)/NBEADS;
-    }
-    
-    kin = 0.0;
-    for (size_t i = 1; i < NBEADS; ++i) {
-        kin = kin + C*((x[3*i + 0] - x[3*(i-1) + 0])*(x[3*i + 0] - x[3*(i-1) + 0]) + \
-                       (x[3*i + 1] - x[3*(i-1) + 1])*(x[3*i + 1] - x[3*(i-1) + 1]) + \
-                       (x[3*i + 2] - x[3*(i-1) + 2])*(x[3*i + 2] - x[3*(i-1) + 2]));
-    }
-    kin = kin + C*((x[0] - x[3*(NBEADS-1) + 0])*(x[0] - x[3*(NBEADS-1) + 0]) + \
-                   (x[1] - x[3*(NBEADS-1) + 1])*(x[1] - x[3*(NBEADS-1) + 1]) + \
-                   (x[2] - x[3*(NBEADS-1) + 2])*(x[2] - x[3*(NBEADS-1) + 2]));
-    
-    double new_density = exp(-(kin + Vs));  
-    printf("kin = %.5e, Vs = %.5e => new_density = %.5e\n", kin, Vs, new_density);
-
-    double u = mt_drand();
-    double alpha = exp(-(new_density - old_density));
-    printf("alpha = %.5e\n", alpha);
-
-    if (u > alpha) {
-        for (size_t i = 1; i < NBEADS; ++i) {
-            x[3*i + 0] = oldx[3*i + 0];
-            x[3*i + 1] = oldx[3*i + 1];
-            x[3*i + 2] = oldx[3*i + 2];
-        }
-
-        return false;
-    }
-   
-    return true; 
-}
-*/
-
-/*
-void make_mcmc_estimate(mt_state *mts, size_t npoints, double *mean, double *var)
-{
-    size_t accumulated = 0;
-    size_t attempted = 0; 
-    
-    double x[3*NBEADS]; 
-    sample(mts, x);
-    for (size_t i = 0; i < 1000; ++i) {
-        accumulated += make_mcmc_move_for_deltas(mts, x);
-    }
-    printf("Acceptance rate: %.3e%%\n", 100.0 * accumulated/1000);
-    
-    for (attempted = 0; accumulated < npoints; attempted++) {
-        if (make_mcmc_move_for_deltas(mts, x) && (attempted % 20 == 0)) {
-            double fval = 0.0;
-            for (size_t i = 0; i < NBEADS; ++i) {
-                double r = sqrt(x[3*i + 0]*x[3*i + 0] + x[3*i + 1]*x[3*i + 1] + x[3*i + 2]*x[3*i + 2]);
-
-                switch (ct) {
-                    case CALCULATION_M0: {
-                        fval = fval + VOLUME*dip_HeAr(r)*dip_HeAr(r)/NBEADS;
-                        break;
-                    }
-                    case CALCULATION_M1: {
-                        double dip = dip_HeAr(r);
-                        double dip_deriv = ddip_HeAr(r);
-                        fval = fval + VOLUME*(dip_deriv*dip_deriv + 2.0/r/r*dip*dip)/NBEADS; 
-                        break;
-                    }
-                } 
-            }
-
-            double diff = fval - *mean;
-            *mean += diff / (accumulated + 1.0);
-            *var += diff * diff * (accumulated / (accumulated + 1.0));
-            accumulated++;
-            
-            // fprintf(fd, "%.5e %.5e %.5e %.5e\n", x[3] - x[0], x[6] - x[3], x[9] - x[6], x[12] - x[9]); 
-
-            //if ((accumulated > 0) && (accumulated % 10 == 0)) {
-            //    printf("[%d] Accumulated %zu/%zu, acceptance rate: %.2e%%\n", 
-            //            wrank, accumulated, npoints, (float)accumulated/attempted*100.0);
-            //    printf("[%d] Integral: %.6e +/- %.6e, reference value: %.10e, rel.diff: %.2f%%\n\n", 
-            //           wrank, VOLUME * *mean, VOLUME*sqrt(*var / accumulated / (accumulated - 1.0)), 
-            //           mu2_ref_value, (VOLUME * *mean - mu2_ref_value)/mu2_ref_value*100.0);
-            // }
-        } 
-    }
-
-    *var = *var/(accumulated-1.0);
-}
-*/
 
 int main(int argc, char *argv[])
 {
@@ -599,6 +451,8 @@ int main(int argc, char *argv[])
         printf("INFO: the requested calculation needs to collect = %zu, SIZE_MAX = %zu\n", 
                 iters*packet_samples_count*wsize, SIZE_MAX);
         assert(iters*packet_samples_count*wsize < SIZE_MAX);
+
+        printf("NBEADS = %d, Temperature = %.3f\n", NBEADS, Temperature);
     }
 
     for (size_t iter = 0; iter < iters; ++iter) {
