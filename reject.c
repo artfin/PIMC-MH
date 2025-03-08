@@ -145,7 +145,7 @@ void sample(mt_state* mts, double *x)
 double density(double *ksi) {
     double C = mu*NBEADS/(2.0*beta);
     double s = -ksi[3*0]*ksi[3*0] - ksi[3*(NBEADS-2)]*ksi[3*(NBEADS-2)];
-    for (size_t i = 1; i < NBEADS - 1; ++i) {
+    for (size_t i = 0; i < NBEADS - 2; ++i) {
         s -= (ksi[3*(i + 1)] - ksi[3*i]) * (ksi[3*(i + 1)] - ksi[3*i]); 
     }
 
