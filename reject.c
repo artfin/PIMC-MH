@@ -143,17 +143,26 @@ void sample(mt_state* mts, double *x)
 
 
 double density(double *ksi) {
-    double C = mu*NBEADS/(2.0*beta); 
-    return exp(C * (-ksi[0]*ksi[0] - (ksi[2]-ksi[1])*(ksi[2]-ksi[1]) - ksi[2]*ksi[2] - (ksi[1]-ksi[0])*(ksi[1]-ksi[0])));
+    double C = mu*NBEADS/(2.0*beta);
+    double s = -ksi[3*0]*ksi[3*0] - ksi[3*(NBEADS-2)]*ksi[3*(NBEADS-2)];
+    for (size_t i = 1; i < NBEADS - 1; ++i) {
+        s -= (ksi[3*(i + 1)] - ksi[3*i]) * (ksi[3*(i + 1)] - ksi[3*i]); 
+    }
+
+    return exp(C*s); 
+    
+    // return exp(C * (-ksi[3*0]*ksi[3*0] - (ksi[3*2]-ksi[3*1])*(ksi[3*2]-ksi[3*1]) - ksi[3*2]*ksi[3*2] - (ksi[3*1]-ksi[3*0])*(ksi[3*1]-ksi[3*0])));
 }
 
-bool make_step(mt_state* mts, double *ksi1, double *ksi2, double *ksi3)
+bool make_step(mt_state* mts, double *ksi)
 {
-    double oldksi[NBEADS-1] = {*ksi1, *ksi2, *ksi3};
-    double ksi[NBEADS-1]    = {*ksi1, *ksi2, *ksi3};
+    double oldksi[3*(NBEADS - 1)];
+    for (size_t i = 0; i < NBEADS - 1; ++i) {
+        oldksi[3 * i] = ksi[3 * i];
+    }
 
     for (size_t i = 0; i < NBEADS-1; ++i) {
-        ksi[i] = ksi[i] + generate_normal(mts, MCMC_KSI_SIGMA); 
+        ksi[3 * i] = ksi[3 * i] + generate_normal(mts, MCMC_KSI_SIGMA); 
     }
 
     double old_dens = density(oldksi);
@@ -162,15 +171,15 @@ bool make_step(mt_state* mts, double *ksi1, double *ksi2, double *ksi3)
     double alpha = new_dens/old_dens;
     double u = mts_drand(mts);
 
-    if (u < alpha) {
-        // accept 
-        *ksi1 = ksi[0]; 
-        *ksi2 = ksi[1]; 
-        *ksi3 = ksi[2]; 
-        return true; 
+    if (u > alpha) {
+        // reject 
+        for (size_t i = 0; i < NBEADS - 1; ++i) {
+            ksi[3 * i] = oldksi[3 * i];
+        }
+        return false; 
     }
 
-    return false;
+    return true;
 }
 
 void sample_with_mcmc(mt_state *mts, double *x, double *ksi, bool first)
@@ -204,9 +213,9 @@ void sample_with_mcmc(mt_state *mts, double *x, double *ksi, bool first)
         memset(ksi, 0, 3*(NBEADS-1)*sizeof(double));
     
         for (size_t i = 0; i < MCMC_KSI_BURNIN; ++i) {
-            make_step(mts, &ksi[0], &ksi[3], &ksi[6]);
-            make_step(mts, &ksi[1], &ksi[4], &ksi[7]);
-            make_step(mts, &ksi[2], &ksi[5], &ksi[8]);
+            make_step(mts, &ksi[0]);
+            make_step(mts, &ksi[1]);
+            make_step(mts, &ksi[2]);
         } 
     } else { 
         x[0] = XMAX * (2.0*mts_drand(mts) - 1.0); // [-XMAX, XMAX]
@@ -214,9 +223,9 @@ void sample_with_mcmc(mt_state *mts, double *x, double *ksi, bool first)
         x[2] = XMAX * (2.0*mts_drand(mts) - 1.0);
 
         for (size_t i = 0; i < MCMC_KSI_SKIP; ++i) {
-            make_step(mts, &ksi[0], &ksi[3], &ksi[6]);
-            make_step(mts, &ksi[1], &ksi[4], &ksi[7]);
-            make_step(mts, &ksi[2], &ksi[5], &ksi[8]);
+            make_step(mts, &ksi[0]);
+            make_step(mts, &ksi[1]);
+            make_step(mts, &ksi[2]);
         }
 
         for (size_t i = 1; i < NBEADS; ++i) {
