@@ -68,9 +68,12 @@
 // -------------------------------------------------------------------------------------
 //
 //
-// M1: 
+// M1 (cm-2 Amagat-2): 
 //    300K, P = 1 =>  4.498e-02 
-//          P = 2 =>  4.547e-02 
+//
+//  300K: P = 2
+//    SIGMA = 0.20, XMAX = 40.0
+//                                  2.157257e-04 (10760mln) -- 0.05% error
 //
 // links:
 // Pooled variance: https://en.wikipedia.org/wiki/Pooled_variance 
@@ -340,6 +343,11 @@ void make_estimate(mt_state *mts, size_t npoints, double *mean, double *var)
     MPI_Comm_size(MPI_COMM_WORLD, &wsize);
     MPI_Comm_rank(MPI_COMM_WORLD, &wrank);
 
+    if (wrank == 0) {
+        printf("Using rejection-based estimator with parameters:\n");
+        printf("  SIGMA = %.5e\n", SIGMA);
+    }
+
     size_t accumulated = 0;
     size_t attempted = 0; 
     
@@ -401,6 +409,13 @@ void make_estimate_with_mcmc_proposal(mt_state *mts, size_t npoints, double *mea
     int wrank, wsize;
     MPI_Comm_size(MPI_COMM_WORLD, &wsize);
     MPI_Comm_rank(MPI_COMM_WORLD, &wrank);
+    
+    if (wrank == 0) {
+        printf("Using MCMC-based estimator with parameters: \n");
+        printf("  MCMC_KSI_SIGMA = %.5e\n", MCMC_KSI_SIGMA); 
+        printf("  MCMC_KSI_BURNIN = %d\n", MCMC_KSI_BURNIN); 
+        printf("  MCMC_KSI_SKIP = %d\n", MCMC_KSI_SKIP);
+    }
 
     size_t accumulated = 0;
     size_t attempted = 0; 
