@@ -18,8 +18,12 @@
 //                    normal margin: 7.6177e-03 (30bln) -- 0.02%
 //
 // 50 K: P = 2
-//   SIGMA = 0.50
-//                    normal margin: 5.3194e-03 (14bln) -- 0.02% 
+//   SIGMA = 0.50, XMAX = 30.0
+//                    normal margin: 5.3194e-03 (14bln) -- 0.02%
+//   SIGMA = 0.50, XMAX = 40.0
+//                    normal margin: 5.327700e-03 -- 0.03% 
+//   SIGMA = 0.50, XMAX = 50.0
+//                    normal margin: 5.327410e-03 -- 0.03% 
 //    
 // -------------------------------------------------------------------------------------
 // 300K: P = 4
@@ -34,14 +38,41 @@
 //                                   7.702722e-03 (4680mln) -- 0.05% error
 //
 // 50K: P = 4
-//   SIGMA = 0.65
-//                   normal magin:   5.4429e-03 (4500mln) -- 0.04% error
+//   SIGMA = 0.65 (XMAX = 30.0)
+//                   normal margin:   5.4429e-03 (4500mln) -- 0.04% error
+//   XMAX = 40.0
+//                   normal margin:   5.450164e-03 (13500mln) -- 0.04% error, 432 CPUh
 //
 // -------------------------------------------------------------------------------------
 // 300K: P = 8
 //   SIGMA = 0.30 -- probably will work 
 // acceptance rate: 3e-6%
-            
+// 50K: P = 8
+//   MCMC_KSI_SIGMA = 0.15
+//   XMAX = 30.0
+//                                   5.493495e-03 (3432mln) -- 0.05% error, 32 CPUh
+//   XMAX = 40.0
+//                                   5.500610e-03 (21528mln) -- 0.03% error, 200 CPUh
+//
+// -------------------------------------------------------------------------------------
+// 50K: P = 16
+//   MCMC_KSI_SIGMA = 0.08, XMAX = 30.0
+//                                   5.506458e-03 (4800mln) -- 0.04% error, 92 CPUh
+//   XMAX = 40.0
+//                                   5.513838e-03 (6984mln) -- 0.05% error, 171 CPUh
+// 50K: P = 32
+//   MCMC_KSI_SIGMA = 0.04, XMAX = 30.0 
+//                                   5.507806e-03 (2688mln) -- 0.06% error, 60 CPUh
+//   XMAX = 40.0 
+//                                   5.514985e-03 (8544mln) -- 0.05% error, 312 CPUh  
+// -------------------------------------------------------------------------------------
+//
+//
+// M1: 
+//    300K, P = 1 =>  4.498e-02 
+//          P = 2 =>  4.547e-02 
+//
+// links:
 // Pooled variance: https://en.wikipedia.org/wiki/Pooled_variance 
 
 #include <stdio.h>
@@ -60,6 +91,10 @@
 #define Boltzmann         1.380649e-23 // SI: J * K^(-1)
 #define Boltzmann_Hartree Boltzmann/Hartree // a.u. 
 
+// conversion coefficients to transform averages in a.u. to traditional units of spectral moments.
+#define ZeroCoeff (0.00361479637/(4.0*M_PI))  // a.u. -> cm-1 Amagat-2
+#define FirstCoeff 63.13325476                // a.u. -> cm-2 Amagat-2
+
 #define RAMTOAMU 1822.888485332
 #define m_He (4.00260325413 * RAMTOAMU)
 #define m_Ar (39.9623831237 * RAMTOAMU)
@@ -67,7 +102,7 @@
 
 #define Rmin 6.597835932201344e+00
 
-#define NBEADS 16
+#define NBEADS 1
 
 // Sampling scheme outline:
 // The construction of the proposal distribution is the following:
@@ -82,12 +117,12 @@
 // of target distribution. If ratio turns out to be >= 1, it means that parameter SIGMA needs to
 // be increased.   
 
-#define SIGMA 0.25 // the width of normally distributed for 'dx' around zeroth bead
+#define SIGMA 0.50 // the width of normally distributed for 'dx' around zeroth bead
 #define MARGIN 0.8 // the width of uniform distribution for 'dx' around zeroth bead
 #define RMIN 4.0   
-#define XMAX 30.0
+#define XMAX 50.0
 #define VOLUME (2*XMAX)*(2*XMAX)*(2*XMAX)
-#define Temperature 50.0 
+#define Temperature 300.0 
 #define beta 1.0/(Boltzmann_Hartree * Temperature)
 
 #define MCMC_KSI_SIGMA 0.02
@@ -102,7 +137,7 @@ typedef enum {
     CALCULATION_M1,
 } CALCULATION_TYPE;
 
-CALCULATION_TYPE ct = CALCULATION_M0;
+CALCULATION_TYPE ct = CALCULATION_M1;
 
 #define MT_GENERATE_CODE_IN_HEADER 0
 #include "mtwist.h"
@@ -322,13 +357,14 @@ void make_estimate(mt_state *mts, size_t npoints, double *mean, double *var)
 
                 switch (ct) {
                     case CALCULATION_M0: {
-                        fval = fval + VOLUME*dip_HeAr(r)*dip_HeAr(r)/NBEADS;
+                        fval = fval + VOLUME*ZeroCoeff*dip_HeAr(r)*dip_HeAr(r)/NBEADS;
                         break;
                     }
                     case CALCULATION_M1: {
+                        // see Eq. (5.37) in Frommhold's Collision-induced absorption in gases, 2006
                         double dip = dip_HeAr(r);
                         double dip_deriv = ddip_HeAr(r);
-                        fval = fval + VOLUME*(dip_deriv*dip_deriv + 2.0/r/r*dip*dip)/NBEADS; 
+                        fval = fval + VOLUME*FirstCoeff*(dip_deriv*dip_deriv + 2.0/r/r*dip*dip)/NBEADS/(2.0*mu); 
                         break;
                     }
                 } 
@@ -385,13 +421,14 @@ void make_estimate_with_mcmc_proposal(mt_state *mts, size_t npoints, double *mea
 
                 switch (ct) {
                     case CALCULATION_M0: {
-                        fval = fval + VOLUME*dip_HeAr(r)*dip_HeAr(r)/NBEADS;
+                        fval = fval + VOLUME*ZeroCoeff*dip_HeAr(r)*dip_HeAr(r)/NBEADS;
                         break;
                     }
                     case CALCULATION_M1: {
+                        // see Eq. (5.37) in Frommhold's Collision-induced absorption in gases, 2006
                         double dip = dip_HeAr(r);
                         double dip_deriv = ddip_HeAr(r);
-                        fval = fval + VOLUME*(dip_deriv*dip_deriv + 2.0/r/r*dip*dip)/NBEADS; 
+                        fval = fval + VOLUME*FirstCoeff*(dip_deriv*dip_deriv + 2.0/r/r*dip*dip)/NBEADS/(2.0*mu); 
                         break;
                     }
                 } 
@@ -427,7 +464,7 @@ int main(int argc, char *argv[])
     int wrank, wsize;
     MPI_Comm_size(MPI_COMM_WORLD, &wsize);
     MPI_Comm_rank(MPI_COMM_WORLD, &wrank);
-    
+   
     mt_state mts = {0};
     uint32_t seed = mts_goodseed(&mts);
     printf("Initialized process (%d) with seed = %" PRIu32 "\n", wrank, seed); 
@@ -444,21 +481,29 @@ int main(int argc, char *argv[])
     size_t packets = 0; 
 
     //size_t ACC_MAX = 400000000;
-    size_t iters = 100;
-    size_t packet_samples_count = 1000000; 
+    size_t iters = 400;
+    size_t packet_samples_count = 4000000; 
            
     if (wrank == 0) { 
         printf("INFO: the requested calculation needs to collect = %zu, SIZE_MAX = %zu\n", 
                 iters*packet_samples_count*wsize, SIZE_MAX);
         assert(iters*packet_samples_count*wsize < SIZE_MAX);
 
-        printf("NBEADS = %d, Temperature = %.3f\n", NBEADS, Temperature);
+
+        if (ct == CALCULATION_M0) {
+            printf("Calculating M0: NBEADS = %d, Temperature = %.3f\n", NBEADS, Temperature);
+        } else if (ct == CALCULATION_M1) {
+            printf("Calculating M1: NBEADS = %d, Temperature = %.3f\n", NBEADS, Temperature);
+        } else {
+            assert(false);
+        }
     }
 
     for (size_t iter = 0; iter < iters; ++iter) {
         double packet_mean = 0.0; 
         double packet_var = 0.0; 
-        make_estimate_with_mcmc_proposal(&mts, packet_samples_count, &packet_mean, &packet_var);
+        //make_estimate_with_mcmc_proposal(&mts, packet_samples_count, &packet_mean, &packet_var);
+        make_estimate(&mts, packet_samples_count, &packet_mean, &packet_var);
 
         if (wrank == 0) {
             double packet_stdev = sqrt(packet_var/packet_samples_count);
