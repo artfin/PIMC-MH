@@ -1,3 +1,8 @@
+// -------------------------------------------------------------------------------------
+//
+//                        ZEROTH SPECTRAL MOMENT 
+//
+// -------------------------------------------------------------------------------------
 // naive version of proposal:
 //   P = 2 => rel.diff: 2.13% (60mln)
 //   P = 2 => rel.diff: 1.29% (120mln)
@@ -36,6 +41,8 @@
 //   SIGMA = 0.47
 //                   normal magin:   7.718137e-03 (1260mln) -- 0.1% error
 //                                   7.702722e-03 (4680mln) -- 0.05% error
+//   MCMC, XMAX = 40.0:
+//                                   2.217813e-06 (28800mln) -- 0.03% error
 //
 // 50K: P = 4
 //   SIGMA = 0.65 (XMAX = 30.0)
@@ -54,6 +61,9 @@
 //   XMAX = 40.0
 //                                   5.500610e-03 (21528mln) -- 0.03% error, 200 CPUh
 //
+// 100K: P = 8
+//   XMAX = 40.0 
+//                                   2.223949e-06 (15192mln) -- 0.04% error 
 // -------------------------------------------------------------------------------------
 // 50K: P = 16
 //   MCMC_KSI_SIGMA = 0.08, XMAX = 30.0
@@ -64,16 +74,67 @@
 //   MCMC_KSI_SIGMA = 0.04, XMAX = 30.0 
 //                                   5.507806e-03 (2688mln) -- 0.06% error, 60 CPUh
 //   XMAX = 40.0 
-//                                   5.514985e-03 (8544mln) -- 0.05% error, 312 CPUh  
+//                                   5.514985e-03 (8544mln) -- 0.05% error, 312 CPUh 
+//
+// 100K: P = 16
+//   XMAX = 40.0
+//                                   2.228808e-06 (7760mln) -- 0.06% error 
+// 
 // -------------------------------------------------------------------------------------
 //
+//                        FIRST SPECTRAL MOMENT 
+//
+// -------------------------------------------------------------------------------------
 //
 // M1 (cm-2 Amagat-2): 
-//    300K, P = 1 =>  4.498e-02 
-//
+//  300K, P = 1
+//    SIGMA = 0.50, XMAX = 40.0
+//                                  2.141049e-04 (11232mln) -- 0.05% error 
 //  300K: P = 2
 //    SIGMA = 0.20, XMAX = 40.0
 //                                  2.157257e-04 (10760mln) -- 0.05% error
+//  300K: P = 4
+//    MCMC_KSI_SIGMA = 0.16, XMAX = 40.0
+//                                  2.162406e-04 (7824mln) -- 0.06% error
+//  300K: P = 8
+//    MCMC_KSI_SIGMA = 0.07, XMAX = 40.0
+//                                  2.163449e-04 (7704mln) -- 0.06% error
+//
+// -------------------------------------------------------------------------------------
+//  100K: P = 1
+//    SIGMA = 0.30, XMAX = 40.0 
+//                                  9.700388e-05 (28800mln) -- 0.03% error 
+//  100K: P = 2
+//    SIGMA = 0.35, XMAX = 40.0
+//                                  9.881564e-05 (19200mln) -- 0.03% error 
+//
+//  100K: P = 4
+//    MCMC_KSI_SIGMA = 0.275, XMAX = 40.0
+//                                  9.945220e-05 (28800mln) -- 0.03% error 
+//
+//  100K: P = 8
+//    MCMC_KSI_SIGMA = 0.115, XMX = 40.0
+//                                  9.956314e-05 (8568mln) -- 0.05% error
+//
+// -------------------------------------------------------------------------------------
+//  50K, P = 1
+//    SIGMA = 0.60, XMAX = 40.0                                
+//                                  7.263442e-05 (10416mln) -- 0.04% error 
+//  50K: P = 2
+//    SIGMA = 0.50, XMAX = 40.0
+//                                  7.415063e-05 (19200mln) -- 0.03% error
+//  50K: P = 4
+//    MCMC_KSI_SIGMA = 0.40, XMAX = 40.0
+//                                  7.481863e-05 (5256mln) -- 0.05% error 
+//                                  
+//  50K: P = 8
+//    MCMC_KSI_SIGMA = 0.50, XMAX = 40.0
+//                                  7.517189e-05 (3744mln) -- 0.06% error
+//
+//  50K: P = 16
+//    MCMC_KSI_SIGMA = 0.07, XMAX = 40.0
+//                                  7.517595e-05 (3360mln) -- 0.07% error
+//
 //
 // links:
 // Pooled variance: https://en.wikipedia.org/wiki/Pooled_variance 
@@ -128,6 +189,8 @@
 #define Temperature 300.0 
 #define beta 1.0/(Boltzmann_Hartree * Temperature)
 
+// the sigma for MCMC is set so that the acceptance rate for the chain 
+// is close to 40%, which is considered as a rule of thumb an optimal rate 
 #define MCMC_KSI_SIGMA 0.02
 #define MCMC_KSI_BURNIN 1000
 #define MCMC_KSI_SKIP 20
